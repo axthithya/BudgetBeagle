@@ -32,7 +32,7 @@ export default function Login() {
     <main className="grid min-h-screen place-items-center bg-cloud-ink px-4 py-10 text-slate-100">
       <form onSubmit={submit} className="w-full max-w-md rounded-lg border border-cloud-line bg-cloud-panel p-6 shadow-2xl">
         <div className="mb-6">
-          <p className="text-sm font-medium uppercase text-cloud-orange">Cloud Cost Detective</p>
+          <p className="text-sm font-medium uppercase text-cloud-orange">BudgetBeagle</p>
           <h1 className="mt-2 text-2xl font-semibold text-white">Welcome back</h1>
         </div>
         <label className="mb-4 block text-sm font-medium text-slate-300">

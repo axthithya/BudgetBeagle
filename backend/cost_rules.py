@@ -53,7 +53,7 @@ def build_cost_report(
     confirmed_issues = sum(1 for item in findings if item.get("category") == "Issue")
     recommendations = sum(1 for item in findings if item.get("category") == "Recommendation")
     observations = sum(1 for item in findings if item.get("category") == "Observation")
-    confidence = _overall_confidence(findings, warnings, billing)
+    confidence = _overall_confidence(findings, warnings, billing, resources)
     yearly_savings = _annualized(total["amount_usd"])
     monthly_account_average = _period_average(billing.get("account_total_ytd_usd"), billing)
     monthly_region_average = _period_average(billing.get("selected_region_ytd_usd"), billing)
@@ -603,25 +603,44 @@ def _period_average(amount: Any, billing: dict[str, Any]) -> float | None:
     return float(average.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
-def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str, Any]], billing: dict[str, Any]) -> dict[str, Any]:
+def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str, Any]], billing: dict[str, Any], resources: list[dict[str, Any]]) -> dict[str, Any]:
     factors: list[dict[str, str]] = []
 
+    # --- Scan completeness ---
+    SUPPORTED_SERVICES = {"EC2", "EBS", "S3", "RDS", "ELB", "CLASSICELB", "NATGATEWAY", "ELASTICIP"}
+    services_scanned = {str(r.get("service") or "").upper() for r in resources}
+    valid_services = services_scanned.intersection(SUPPORTED_SERVICES)
+    warn_services = {str(w.get("service") or "").upper() for w in warnings}
+    
+    completed_services = [s for s in valid_services if s not in warn_services]
+    limited_services = [s for s in valid_services if s in warn_services]
+
+    score = 90
+    
+    if completed_services:
+        factors.append({
+            "name": "Service scan coverage",
+            "effect": "positive",
+            "reason": f"Completed: {', '.join(sorted(completed_services))}.",
+        })
+    if limited_services:
+        factors.append({
+            "name": "Service scan limitations",
+            "effect": "negative",
+            "reason": f"Completed with limitations: {', '.join(sorted(limited_services))}.",
+        })
+
     # --- Finding evidence scores ---
-    if findings:
-        score = round(sum(_confidence_score(str(item.get("confidence") or "low")) for item in findings) / len(findings))
-        avg_label = "high" if score >= 80 else "medium" if score >= 65 else "low"
+    actionable_findings = [f for f in findings if f.get("category", "").lower() != "observation"]
+    if actionable_findings:
+        finding_score = round(sum(_confidence_score(str(item.get("confidence") or "low")) for item in actionable_findings) / len(actionable_findings))
+        avg_label = "high" if finding_score >= 80 else "medium" if finding_score >= 65 else "low"
         factors.append({
             "name": "Finding evidence quality",
             "effect": "positive" if avg_label != "low" else "negative",
-            "reason": f"Average finding confidence is {avg_label} ({score}%).",
+            "reason": f"Average confidence of actionable findings is {avg_label} ({finding_score}%).",
         })
-    else:
-        score = 90
-        factors.append({
-            "name": "Resource discovery",
-            "effect": "positive",
-            "reason": "No findings were generated; baseline confidence is high.",
-        })
+        score = (score + finding_score) // 2
 
     # --- Warning penalty ---
     warning_count = len(warnings)
@@ -650,7 +669,7 @@ def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str,
         })
 
     # --- Metric duration factors ---
-    for finding in findings:
+    for finding in actionable_findings:
         evidence = finding.get("evidence", {})
         duration_str = evidence.get("Actual covered duration", "")
         if "less than" in str(duration_str) or "0." in str(duration_str):
@@ -661,22 +680,13 @@ def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str,
             })
             break  # Avoid flooding factors
 
-    # --- Resource scan coverage ---
-    services_scanned = {f.get("service") for f in findings if f.get("service")}
-    if services_scanned:
-        factors.append({
-            "name": "Resource discovery",
-            "effect": "positive",
-            "reason": f"Scans completed for: {', '.join(sorted(services_scanned))}.",
-        })
-
     score = max(35, min(95, score))
     label = "High" if score >= 80 else "Medium" if score >= 65 else "Low"
     return {
         "score": score,
         "label": label,
         "level": label.lower(),
-        "basis": "Derived from finding evidence confidence, scan warnings, and billing data availability.",
+        "basis": "Report data confidence represents scan completeness, evidence quality, and optional data availability.",
         "factors": factors,
     }
 

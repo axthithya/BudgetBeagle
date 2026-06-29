@@ -41,7 +41,7 @@ def cors_origins() -> list[str]:
     return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 
-app = FastAPI(title="AI Cloud Cost Detective API", version="0.4.0")
+app = FastAPI(title="BudgetBeagle API", version="2.0.0")
 progress_manager = ProgressManager()
 
 app.add_middleware(
@@ -66,6 +66,11 @@ class AuthRequest(BaseModel):
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    with SessionLocal() as db:
+        from db import cleanup_stale_jobs
+        count = cleanup_stale_jobs(db)
+        if count > 0:
+            print(f"Cleaned up {count} stale job(s) from previous run.")
 
 
 @app.get("/api/health")
@@ -272,6 +277,27 @@ def get_analysis(
     return {"analysis": _safe_serialize(analysis)}
 
 
+@app.post("/api/analyses/{analysis_id}/cancel")
+def cancel_analysis_endpoint(
+    analysis_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    from db import cancel_analysis
+    analysis = db.get(Analysis, analysis_id)
+    if not analysis or analysis.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found.")
+    
+    if analysis.status in {"completed", "completed_with_warnings", "failed", "cancelled", "interrupted"}:
+        return {"analysis": _safe_serialize(analysis)}
+        
+    analysis = cancel_analysis(db, analysis_id, "Analysis was cancelled by the user.")
+    if analysis:
+        # Notify clients
+        asyncio.create_task(progress_manager.broadcast(analysis_id, "Analysis cancelled."))
+    return {"analysis": _safe_serialize(analysis)}
+
+
 @app.websocket("/ws/progress/{analysis_id}")
 async def websocket_progress(websocket: WebSocket, analysis_id: int) -> None:
     token = websocket.query_params.get("token", "")
@@ -311,6 +337,9 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
         scan_result = await run_in_threadpool(lambda: AwsScanner(region, resource_group).scan())
 
         await progress_manager.publish(analysis_id, "Building deterministic cost report...")
+        db.refresh(analysis)
+        if analysis.status == "cancelled":
+            return
         ai_analysis = await run_in_threadpool(lambda: analyze_costs(scan_result))
 
         await progress_manager.publish(analysis_id, "Storing results...")
@@ -359,4 +388,5 @@ def _safe_serialize(analysis: Analysis) -> dict[str, Any]:
     data = serialize_analysis(analysis)
     if isinstance(data.get("analysis_result"), dict):
         data["analysis_result"] = sanitize_report(data["analysis_result"])
+    data["schema_version"] = "2.0"
     return data

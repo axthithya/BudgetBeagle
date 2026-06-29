@@ -18,7 +18,7 @@ export function Navbar() {
           <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-cloud-line bg-cloud-ink text-cloud-orange">
             $ 
           </span>
-          <span className="truncate">Cloud Cost Detective</span>
+          <span className="truncate">BudgetBeagle</span>
         </NavLink>
         <nav className="flex items-center gap-2">
           <NavLink

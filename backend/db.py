@@ -122,6 +122,28 @@ def fail_analysis(db: Session, analysis_id: int, message: str) -> Analysis | Non
     return analysis
 
 
+def cancel_analysis(db: Session, analysis_id: int, message: str) -> Analysis | None:
+    analysis = db.get(Analysis, analysis_id)
+    if not analysis:
+        return None
+    analysis.status = "cancelled"
+    analysis.analysis_result = {"error": message}
+    db.commit()
+    db.refresh(analysis)
+    return analysis
+
+
+def cleanup_stale_jobs(db: Session) -> int:
+    stale_analyses = db.query(Analysis).filter(Analysis.status.in_(["queued", "running"])).all()
+    count = len(stale_analyses)
+    for analysis in stale_analyses:
+        analysis.status = "interrupted"
+        analysis.analysis_result = {"error": "Analysis was interrupted by server restart."}
+    if count > 0:
+        db.commit()
+    return count
+
+
 def serialize_analysis(analysis: Analysis) -> dict[str, Any]:
     return {
         "id": analysis.id,

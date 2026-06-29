@@ -71,6 +71,7 @@ export default function Dashboard() {
   const [awsStatus, setAwsStatus] = useState<AwsStatus | null>(null);
   const [showPolicyModal, setShowPolicyModal] = useState(false);
   const [policyCopied, setPolicyCopied] = useState(false);
+  const [currentAnalysisId, setCurrentAnalysisId] = useState<number | null>(null);
 
   useEffect(() => {
     loadRegions();
@@ -132,6 +133,7 @@ export default function Dashboard() {
         method: "POST",
         body: JSON.stringify({ region, resource_group: group || null }),
       });
+      setCurrentAnalysisId(data.analysis_id);
       const token = encodeURIComponent(getToken());
       const socket = new WebSocket(`${websocketUrl(data.websocket_url)}?token=${token}`);
       socketRef.current = socket;
@@ -141,11 +143,13 @@ export default function Dashboard() {
         setMessages((current) => [...current, payload.message]);
         if (payload.message === "Analysis complete") {
           setRunning(false);
+          setCurrentAnalysisId(null);
           socket.close();
           navigate(`/report/${data.analysis_id}`);
         }
-        if (payload.message.startsWith("Analysis failed")) {
+        if (payload.message.startsWith("Analysis failed") || payload.message === "Analysis cancelled.") {
           setRunning(false);
+          setCurrentAnalysisId(null);
         }
       };
       socket.onerror = () => {
@@ -154,7 +158,17 @@ export default function Dashboard() {
       };
     } catch (err) {
       setRunning(false);
+      setCurrentAnalysisId(null);
       setError(err instanceof Error ? err.message : "Analysis could not start.");
+    }
+  }
+
+  async function cancelAnalysis() {
+    if (!currentAnalysisId) return;
+    try {
+      await apiFetch(`/api/analyses/${currentAnalysisId}/cancel`, { method: "POST" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel analysis.");
     }
   }
 
@@ -223,15 +237,27 @@ export default function Dashboard() {
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={runAnalysis}
-            disabled={!region || loading || running}
-            className="mt-6 inline-flex h-11 items-center gap-2 rounded-md bg-cloud-orange px-5 font-semibold text-slate-950 hover:bg-orange-300 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <Play className="h-4 w-4" aria-hidden="true" />
-            {running ? "Running" : "Run Analysis"}
-          </button>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={runAnalysis}
+              disabled={!region || loading || running}
+              className="inline-flex h-11 items-center gap-2 rounded-md bg-cloud-orange px-5 font-semibold text-slate-950 hover:bg-orange-300 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-cloud-cyan"
+            >
+              <Play className="h-4 w-4" aria-hidden="true" />
+              {running ? "Running" : "Run Analysis"}
+            </button>
+            {running && currentAnalysisId && (
+              <button
+                type="button"
+                onClick={cancelAnalysis}
+                className="inline-flex h-11 items-center gap-2 rounded-md border border-cloud-line px-5 font-semibold text-slate-300 hover:border-cloud-cyan hover:text-white focus:outline-none focus:ring-2 focus:ring-cloud-cyan"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+                Cancel analysis
+              </button>
+            )}
+          </div>
         </section>
 
         <aside>
