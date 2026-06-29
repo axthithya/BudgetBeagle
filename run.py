@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -18,7 +19,10 @@ ROOT_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = ROOT_DIR / "backend"
 FRONTEND_DIR = ROOT_DIR / "frontend"
 VENV_DIR = BACKEND_DIR / ".venv"
-APP_URL = "http://localhost:5173"
+DEV_HOST = os.environ.get("BUDGETBEAGLE_DEV_HOST", "0.0.0.0")
+DEFAULT_BACKEND_PORT = 8000
+DEFAULT_FRONTEND_PORT = 5173
+PORT_SCAN_LIMIT = 100
 
 
 def fail(message: str) -> None:
@@ -28,6 +32,54 @@ def fail(message: str) -> None:
 
 def step(message: str) -> None:
     print(f"\n==> {message}", flush=True)
+
+
+def configured_port(env_name: str, default: int, env_values: dict[str, str] | None = None) -> int:
+    raw = os.environ.get(env_name, "") or (env_values or {}).get(env_name, "")
+    if not raw:
+        return default
+
+    try:
+        port = int(raw)
+    except ValueError:
+        fail(f"{env_name} must be a TCP port number. Current value: {raw}")
+
+    if not 1 <= port <= 65535:
+        fail(f"{env_name} must be between 1 and 65535. Current value: {raw}")
+
+    return port
+
+
+def is_port_available(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+    except OSError:
+        return False
+
+    return True
+
+
+def find_available_port(preferred: int, label: str, env_name: str) -> int:
+    last_port = min(preferred + PORT_SCAN_LIMIT - 1, 65535)
+    for port in range(preferred, last_port + 1):
+        if is_port_available(DEV_HOST, port):
+            if port != preferred:
+                print(f"{label} port {preferred} is unavailable; using {port}.", flush=True)
+            return port
+
+    fail(f"No available {label.lower()} port found from {preferred} to {last_port}. Set {env_name} to an open port.")
+
+
+def cors_origins_for(frontend_port: int, env_values: dict[str, str] | None = None) -> str:
+    raw_origins = os.environ.get("BUDGETBEAGLE_CORS_ORIGINS", "") or (env_values or {}).get("BUDGETBEAGLE_CORS_ORIGINS", "")
+    configured = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+    launcher_origins = [f"http://localhost:{frontend_port}", f"http://127.0.0.1:{frontend_port}"]
+    return ",".join(dict.fromkeys(configured + launcher_origins))
 
 
 def check_python_version() -> None:
@@ -149,10 +201,14 @@ def process_kwargs() -> dict[str, object]:
     return {"start_new_session": True}
 
 
-def start_process(command: list[str | Path], cwd: Path) -> subprocess.Popen[bytes]:
+def start_process(command: list[str | Path], cwd: Path, env: dict[str, str] | None = None) -> subprocess.Popen[bytes]:
     printable = " ".join(str(part) for part in command)
     print(f"$ {printable}", flush=True)
-    return subprocess.Popen([str(part) for part in command], cwd=cwd, **process_kwargs())
+    process_env = None
+    if env is not None:
+        process_env = os.environ.copy()
+        process_env.update(env)
+    return subprocess.Popen([str(part) for part in command], cwd=cwd, env=process_env, **process_kwargs())
 
 
 def signal_process(process: subprocess.Popen[bytes]) -> None:
@@ -226,25 +282,47 @@ def start_app(python: Path, node: str) -> int:
     if not vite_bin.exists():
         fail("Vite was not found in node_modules. Run the launcher again after npm install completes.")
 
+    backend_env_values = parse_env_file(BACKEND_DIR / ".env")
+    backend_port = find_available_port(
+        configured_port("BUDGETBEAGLE_BACKEND_PORT", DEFAULT_BACKEND_PORT, backend_env_values),
+        "Backend",
+        "BUDGETBEAGLE_BACKEND_PORT",
+    )
+    frontend_port = find_available_port(
+        configured_port("BUDGETBEAGLE_FRONTEND_PORT", DEFAULT_FRONTEND_PORT, backend_env_values),
+        "Frontend",
+        "BUDGETBEAGLE_FRONTEND_PORT",
+    )
+    app_url = f"http://localhost:{frontend_port}"
+    api_url = f"http://localhost:{backend_port}"
+
     step("Starting backend and frontend")
+    print(f"Backend API: {api_url}", flush=True)
+    print(f"Frontend app: {app_url}", flush=True)
+
     processes = [
         (
             "Backend",
             start_process(
-                [python, "-m", "uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"],
+                [python, "-m", "uvicorn", "main:app", "--reload", "--host", DEV_HOST, "--port", str(backend_port)],
                 BACKEND_DIR,
+                env={"BUDGETBEAGLE_CORS_ORIGINS": cors_origins_for(frontend_port, backend_env_values)},
             ),
         ),
         (
             "Frontend",
-            start_process([node, vite_bin, "--host", "0.0.0.0"], FRONTEND_DIR),
+            start_process(
+                [node, vite_bin, "--host", DEV_HOST, "--port", str(frontend_port), "--strictPort"],
+                FRONTEND_DIR,
+                env={"VITE_API_URL": os.environ.get("VITE_API_URL", api_url)},
+            ),
         ),
     ]
 
     try:
         time.sleep(2)
-        webbrowser.open(APP_URL)
-        print(f"\nApp is starting at {APP_URL}. Press Ctrl+C to stop.", flush=True)
+        webbrowser.open(app_url)
+        print(f"\nApp is starting at {app_url}. Press Ctrl+C to stop.", flush=True)
         return wait_for_processes(processes)
     except KeyboardInterrupt:
         print("\nReceived Ctrl+C.", flush=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 from dotenv import load_dotenv
@@ -31,12 +32,18 @@ from progress import ProgressManager
 
 load_dotenv()
 
+
+def cors_origins() -> list[str]:
+    raw_origins = os.getenv("BUDGETBEAGLE_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+
+
 app = FastAPI(title="AI Cloud Cost Detective API", version="0.4.0")
 progress_manager = ProgressManager()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

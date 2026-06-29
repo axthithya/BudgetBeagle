@@ -56,8 +56,8 @@ The app has two parts:
 
 | Part | What it does |
 | --- | --- |
-| Frontend | React, Vite, TypeScript, Tailwind UI at `http://localhost:5173` |
-| Backend | FastAPI API at `http://localhost:8000` |
+| Frontend | React, Vite, TypeScript, Tailwind UI; defaults to `http://localhost:5173` |
+| Backend | FastAPI API; defaults to `http://localhost:8000` |
 | AWS Scanner | Uses `boto3` and your AWS credentials to read inventory, CloudWatch metrics, and optional Cost Explorer billing context |
 | Cost Analyzer | Uses deterministic rules for findings, savings, confidence, billing summaries, pricing status, warnings, and command templates; optional Groq wording can clarify validated explanations |
 | Database | SQLite by default, with optional Postgres/RDS through `DATABASE_URL` |
@@ -137,6 +137,8 @@ That second `py run.py` starts both servers and opens the app at:
 http://localhost:5173
 ```
 
+If `5173` or `8000` is already in use, the launcher prints the fallback ports it selected and opens the matching URL.
+
 Keep that terminal open while using BudgetBeagle. Press `Ctrl+C` in the terminal to stop the backend and frontend.
 
 ## How To Fill `backend/.env`
@@ -154,6 +156,8 @@ GROQ_MODEL=openai/gpt-oss-120b
 JWT_SECRET=replace-this-with-a-long-random-secret
 DATABASE_URL=sqlite:///./cost_detective.db
 BUDGETBEAGLE_ENABLE_COST_EXPLORER=true
+# Optional: BUDGETBEAGLE_BACKEND_PORT=8000
+# Optional: BUDGETBEAGLE_FRONTEND_PORT=5173
 ```
 
 What each value means:
@@ -168,6 +172,8 @@ What each value means:
 | `JWT_SECRET` | Yes | Any long random secret string used to sign local login tokens |
 | `DATABASE_URL` | No for normal local use | Keep SQLite unless you want Postgres |
 | `BUDGETBEAGLE_ENABLE_COST_EXPLORER` | No | Keep `true` to collect account billing context when IAM allows `ce:GetCostAndUsage`; set `false` to skip billing collection |
+| `BUDGETBEAGLE_BACKEND_PORT` | No | Optional local backend port; the launcher uses the next open port if this one is busy |
+| `BUDGETBEAGLE_FRONTEND_PORT` | No | Optional local frontend port; the launcher opens the actual selected URL |
 
 You can generate a `JWT_SECRET` with this PowerShell command:
 
@@ -234,7 +240,7 @@ Security tips:
 py run.py
 ```
 
-2. Open `http://localhost:5173` if it does not open automatically.
+2. Open the frontend URL printed by the launcher if it does not open automatically. It is normally `http://localhost:5173`.
 3. Create an account on the signup page. This is local app authentication, not your AWS account.
 4. Choose an AWS region.
 5. Optionally choose an AWS Resource Group.
@@ -350,7 +356,7 @@ npm run dev
 | `JWT_SECRET is not configured` | Replace the placeholder `JWT_SECRET` in `backend/.env` with a long random string. |
 | AWS authentication error | Check `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, region, and IAM permissions. |
 | Region list fails to load | Your AWS credentials may not have `ec2:DescribeRegions`, or the credentials are invalid. |
-| Port already in use | Stop the old terminal/server or free ports `5173` and `8000`. |
+| Port already in use | The launcher now checks `5173` and `8000`, then uses the next open ports and prints the exact URLs. To force a port, set `BUDGETBEAGLE_FRONTEND_PORT` or `BUDGETBEAGLE_BACKEND_PORT` in `backend/.env`. |
 | Groq model error | Check [Groq model documentation](https://console.groq.com/docs/models) and update `GROQ_MODEL` in `backend/.env`. |
 
 ## Project Structure
