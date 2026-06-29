@@ -64,17 +64,34 @@ See [RequestFlow.MD](./RequestFlow.MD) for the short flow reference.
 
 ## Quick Start
 
-### Option A: one command
+Repository: [axthithya/BudgetBeagle](https://github.com/axthithya/BudgetBeagle)
 
 ```bash
-git clone <your-repo-url>
-cd <your-repo-name>
+git clone https://github.com/axthithya/BudgetBeagle.git
+cd BudgetBeagle
+```
+
+### Option A: native launcher
+
+Mac/Linux:
+
+```bash
 ./start.sh
 ```
 
-On the first run, `start.sh` creates `backend/.env` and exits. Fill in `GROQ_API_KEY`, replace `JWT_SECRET`, and add AWS credentials if you are not using an existing AWS profile or IAM role. Then run `./start.sh` again.
+Windows CMD or PowerShell:
 
-Windows users can run `./start.sh` from WSL or Git Bash.
+```bat
+start.bat
+```
+
+Any platform with Python on PATH:
+
+```bash
+python run.py
+```
+
+On the first run, the launcher creates `backend/.env` and exits. Fill in `GROQ_API_KEY`, replace `JWT_SECRET`, and add AWS credentials if you are not using an existing AWS profile or IAM role. Then run the same launcher command again.
 
 ### Option B: Docker
 
