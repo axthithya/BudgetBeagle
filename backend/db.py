@@ -96,6 +96,7 @@ def complete_analysis(
     resources_scanned: int,
     issues_found: int,
     estimated_savings: str,
+    status: str = "completed",
 ) -> Analysis | None:
     analysis = db.get(Analysis, analysis_id)
     if not analysis:
@@ -104,7 +105,7 @@ def complete_analysis(
     analysis.resources_scanned = resources_scanned
     analysis.issues_found = issues_found
     analysis.estimated_savings = estimated_savings
-    analysis.status = "completed"
+    analysis.status = status
     db.commit()
     db.refresh(analysis)
     return analysis

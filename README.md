@@ -1,6 +1,6 @@
 # BudgetBeagle - AI Cloud Cost Detective for AWS
 
-BudgetBeagle is a local web app that scans your AWS account, finds practical cost-saving opportunities, and asks Groq AI to turn the scan results into a clear report with estimated monthly savings and reviewable `aws` CLI fix commands.
+BudgetBeagle is a local web app that scans your AWS account and uses deterministic backend rules to produce evidence-backed cost findings, savings, warnings, and reviewable `aws` CLI fix commands. Groq AI is optional and may only rewrite validated explanations; it does not decide findings, savings, pricing, resource IDs, or commands.
 
 It is built for people who want to understand where AWS money may be leaking without manually checking EC2, EBS, RDS, S3, load balancers, Elastic IPs, NAT Gateways, and CloudWatch metrics one service at a time.
 
@@ -45,8 +45,9 @@ You open the React app
   -> sign up or log in
   -> choose an AWS region and optional AWS Resource Group
   -> FastAPI backend scans AWS with boto3
-  -> CloudWatch metrics are collected where available
-  -> Groq analyzes the inventory and metrics
+  -> CloudWatch metrics and optional AWS Cost Explorer billing data are collected where available
+  -> deterministic backend rules analyze inventory, metrics, billing, pricing, confidence, and warnings
+  -> optional Groq wording improves validated explanations
   -> the report is saved in SQLite
   -> the frontend shows savings, issues, notes, and copyable commands
 ```
@@ -57,8 +58,8 @@ The app has two parts:
 | --- | --- |
 | Frontend | React, Vite, TypeScript, Tailwind UI at `http://localhost:5173` |
 | Backend | FastAPI API at `http://localhost:8000` |
-| AWS Scanner | Uses `boto3` and your AWS credentials to read inventory and CloudWatch metrics |
-| AI Analyzer | Uses your Groq API key to generate a structured cost report |
+| AWS Scanner | Uses `boto3` and your AWS credentials to read inventory, CloudWatch metrics, and optional Cost Explorer billing context |
+| Cost Analyzer | Uses deterministic rules for findings, savings, confidence, billing summaries, pricing status, warnings, and command templates; optional Groq wording can clarify validated explanations |
 | Database | SQLite by default, with optional Postgres/RDS through `DATABASE_URL` |
 
 More architecture notes are in [Architecture.MD](./Architecture.MD), and the request flow is in [RequestFlow.MD](./RequestFlow.MD).
@@ -71,10 +72,14 @@ More architecture notes are in [Architecture.MD](./Architecture.MD), and the req
 - Live progress updates through WebSocket
 - Scan history for each signed-in user
 - Saved reports you can reopen later
-- Estimated monthly savings
-- Severity labels for each issue
+- Account-wide and selected-region YTD billing summaries when Cost Explorer is available
+- Monthly account billing, service-cost, and billed-region tables
+- Evidence-backed monthly and yearly savings displays
+- Severity and confidence labels for each issue
+- Overall confidence score derived from evidence, warnings, and billing availability
+- Tabbed report views for overview, billing, findings, resources, commands, and warnings
 - Human-readable explanations
-- Copyable `aws` CLI fix commands
+- Copyable `aws` CLI fix commands only when backend validation passes
 - Read-only AWS scanning behavior
 - SQLite local database by default
 - Docker option for users who prefer containers
@@ -85,7 +90,7 @@ Install these first:
 
 1. [Python 3.10 or newer](https://www.python.org/downloads/windows/)
 2. [Node.js 18 or newer](https://nodejs.org/)
-3. A [Groq API key](https://console.groq.com/keys)
+3. Optional: a [Groq API key](https://console.groq.com/keys) for clearer wording
 4. AWS credentials with read-only permissions
 
 On Windows, use the Python launcher command:
@@ -148,6 +153,7 @@ GROQ_API_KEY=gsk_...
 GROQ_MODEL=openai/gpt-oss-120b
 JWT_SECRET=replace-this-with-a-long-random-secret
 DATABASE_URL=sqlite:///./cost_detective.db
+BUDGETBEAGLE_ENABLE_COST_EXPLORER=true
 ```
 
 What each value means:
@@ -157,10 +163,11 @@ What each value means:
 | `AWS_ACCESS_KEY_ID` | Usually yes for local beginners | Your IAM user's access key ID |
 | `AWS_SECRET_ACCESS_KEY` | Usually yes for local beginners | Your IAM user's secret access key |
 | `AWS_DEFAULT_REGION` | Yes | The default AWS region, for example `us-east-1`, `us-west-2`, or `ap-south-1` |
-| `GROQ_API_KEY` | Yes | Your Groq API key from [Groq Console](https://console.groq.com/keys) |
-| `GROQ_MODEL` | Yes | Keep the default unless Groq model availability changes |
+| `GROQ_API_KEY` | No | Optional Groq API key for explanation rewriting only |
+| `GROQ_MODEL` | No | Optional model override when `GROQ_API_KEY` is set |
 | `JWT_SECRET` | Yes | Any long random secret string used to sign local login tokens |
 | `DATABASE_URL` | No for normal local use | Keep SQLite unless you want Postgres |
+| `BUDGETBEAGLE_ENABLE_COST_EXPLORER` | No | Keep `true` to collect account billing context when IAM allows `ce:GetCostAndUsage`; set `false` to skip billing collection |
 
 You can generate a `JWT_SECRET` with this PowerShell command:
 
@@ -239,18 +246,18 @@ py run.py
 
 ## What The Report Means
 
-Each report can include:
+Each report is organized into tabs:
 
-| Report field | Meaning |
+| Report area | Meaning |
 | --- | --- |
-| Summary | Short explanation of the main findings |
-| Resources scanned | Count of AWS resources included in the analysis |
-| Issues found | Number of possible savings opportunities |
-| Estimated savings | Conservative estimated monthly savings when possible |
-| Severity | High, medium, or low priority |
-| Explanation | Why the resource may be wasting money |
-| Fix command | A suggested `aws` CLI command for you to review |
-| Notes | Extra context from the AI analyzer |
+| Overview | Account/region scan summary, confidence score, warning summary, and top-level optimization counts |
+| Billing | Cost Explorer YTD account total, selected-region spend, monthly account costs, service costs, and billed regions when available |
+| Findings | Deterministic issues, recommendations, and observations with evidence, pricing basis, savings basis, confidence, and action risk |
+| Resources | The scanned AWS inventory with service, resource ID, type, state, and key scalar metrics |
+| Commands | Backend-validated `aws` CLI commands only when enough evidence exists and service constraints are satisfied |
+| Warnings | Permission or inspection gaps such as denied lifecycle or Cost Explorer checks |
+
+Savings are shown only when the backend has numeric, evidence-backed data. Unknown or unsupported savings are displayed as `Not enough data`. Confidence scores are derived from finding confidence, scan warnings, and whether billing context was available.
 
 Treat the report as a decision aid. For example, an "idle" resource might still be important if it is used during month-end processing, disaster recovery, demos, or low-traffic production windows.
 
@@ -275,6 +282,7 @@ A practical least-privilege starting policy:
         "cloudwatch:GetMetricData",
         "cloudwatch:GetMetricStatistics",
         "cloudwatch:ListMetrics",
+        "ce:GetCostAndUsage",
         "elasticloadbalancing:Describe*",
         "resource-groups:ListGroups",
         "resource-groups:ListGroupResources",
@@ -286,7 +294,7 @@ A practical least-privilege starting policy:
 }
 ```
 
-If a service is denied, BudgetBeagle tries to keep scanning the services it can access and records the scanner error in the analysis payload.
+If a service is denied, BudgetBeagle tries to keep scanning the services it can access and records the scanner error or warning in the analysis payload. If Cost Explorer is denied, inventory scanning still works and the Billing tab explains that account spend could not be verified.
 
 ## Other Ways To Run
 
@@ -338,7 +346,7 @@ npm run dev
 | `python run.py` does not work on Windows | Use `py run.py` instead. Your Windows Python launcher works even when the `python` alias is broken. |
 | `start.bat` does not work | Use `py run.py`. The batch file calls `python run.py`, so it has the same PATH problem. |
 | `Node.js 18+ is required` | Install Node.js from [nodejs.org](https://nodejs.org/), close the terminal, open a new terminal, and run `py run.py` again. |
-| `GROQ_API_KEY is not configured` | Add `GROQ_API_KEY` to `backend/.env`, save it, then run `py run.py` again. |
+| Optional AI wording is missing | Add `GROQ_API_KEY` to `backend/.env` only if you want Groq-generated explanation rewrites. |
 | `JWT_SECRET is not configured` | Replace the placeholder `JWT_SECRET` in `backend/.env` with a long random string. |
 | AWS authentication error | Check `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, region, and IAM permissions. |
 | Region list fails to load | Your AWS credentials may not have `ec2:DescribeRegions`, or the credentials are invalid. |
@@ -354,8 +362,11 @@ BudgetBeagle/
   docker-compose.yml      # Docker backend/frontend setup
   backend/
     main.py               # FastAPI routes, auth, scan jobs, WebSocket progress
-    aws_scanner.py        # boto3 AWS inventory and CloudWatch scanner
-    ai_analyzer.py        # Groq analysis logic
+    aws_scanner.py        # boto3 AWS inventory, CloudWatch, and billing scanner
+    billing.py            # AWS Cost Explorer billing context collector
+    cost_rules.py         # deterministic findings, confidence, totals, warnings, and commands
+    pricing.py            # AWS Pricing API resolver
+    ai_analyzer.py        # deterministic report entry point plus optional Groq wording
     db.py                 # SQLAlchemy models and persistence
     .env.example          # Template used to create backend/.env
   frontend/

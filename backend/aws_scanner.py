@@ -6,6 +6,7 @@ from statistics import mean
 from typing import Any
 
 import boto3
+from billing import scan_billing_context
 from botocore.exceptions import (
     BotoCoreError,
     ClientError,
@@ -57,7 +58,9 @@ class AwsScanner:
         self.resource_group = resource_group
         self.session = boto3.Session(region_name=region)
         self.errors: list[dict[str, str]] = []
+        self.warnings: list[dict[str, str]] = []
         self._resource_group_arns: set[str] | None = None
+        self.account_id: str | None = None
 
     @staticmethod
     def enabled_regions() -> list[str]:
@@ -110,17 +113,29 @@ class AwsScanner:
         return {
             "region": self.region,
             "resource_group": self.resource_group,
+            "account_id": self.account_id,
+            "billing": self._scan_billing_context(),
             "resources": resources,
             "errors": self.errors,
+            "warnings": self.warnings,
         }
 
     def _validate_credentials(self) -> None:
         try:
-            self.session.client("sts").get_caller_identity()
+            identity = self.session.client("sts").get_caller_identity()
+            self.account_id = identity.get("Account")
         except (NoCredentialsError, PartialCredentialsError) as exc:
             raise ScannerAuthError("AWS credentials are missing or incomplete.") from exc
         except ClientError as exc:
             raise _client_error_to_scanner_error(exc) from exc
+
+    def _scan_billing_context(self) -> dict[str, Any]:
+        return scan_billing_context(
+            self.session,
+            selected_region=self.region,
+            account_id=self.account_id,
+            warn=self._record_warning,
+        )
 
     def _client(self, service: str):
         return self.session.client(service)
@@ -139,6 +154,24 @@ class AwsScanner:
             )
             return
         self.errors.append({"service": service, "code": exc.__class__.__name__, "message": message})
+
+    def _record_warning(
+        self,
+        service: str,
+        resource_id: str | None,
+        code: str,
+        message: str,
+        permission: str | None = None,
+    ) -> None:
+        warning = {
+            "service": service,
+            "resource_id": resource_id or "",
+            "code": code,
+            "message": message,
+        }
+        if permission:
+            warning["permission"] = permission
+        self.warnings.append(warning)
 
     def _load_resource_group_scope(self) -> None:
         if not self.resource_group:
@@ -191,6 +224,80 @@ class AwsScanner:
             self._record_error("cloudwatch", exc)
             return None
 
+    def _metric_summary(
+        self,
+        namespace: str,
+        metric_name: str,
+        dimensions: list[dict[str, str]],
+        statistic: str = "Average",
+        days: int = 14,
+        period: int = 3600,
+        start_time: datetime | None = None,
+    ) -> dict[str, Any]:
+        end = datetime.now(timezone.utc)
+        requested_start = end - timedelta(days=days)
+        query_start = requested_start
+        launch_time = _ensure_utc(start_time)
+        if launch_time and launch_time > query_start:
+            query_start = launch_time
+        summary: dict[str, Any] = {
+            "metric_source": "CloudWatch",
+            "metric_name": metric_name,
+            "statistic": statistic,
+            "average": None,
+            "minimum": None,
+            "maximum": None,
+            "datapoint_count": 0,
+            "requested_start": requested_start.isoformat(),
+            "requested_end": end.isoformat(),
+            "requested_window_days": days,
+            "query_start": query_start.isoformat(),
+            "actual_start": None,
+            "actual_end": None,
+            "actual_duration_hours": 0,
+            "period_seconds": period,
+            "instance_launch_time": launch_time.isoformat() if launch_time else None,
+            "status": "missing",
+        }
+        try:
+            response = self._client("cloudwatch").get_metric_statistics(
+                Namespace=namespace,
+                MetricName=metric_name,
+                Dimensions=dimensions,
+                StartTime=query_start,
+                EndTime=end,
+                Period=period,
+                Statistics=["Average", "Minimum", "Maximum"] if statistic == "Average" else [statistic],
+            )
+            datapoints = response.get("Datapoints", [])
+            values = [float(point[statistic]) for point in datapoints if point.get(statistic) is not None]
+            timestamps = [_ensure_utc(point.get("Timestamp")) for point in datapoints if point.get(statistic) is not None]
+            timestamps = [timestamp for timestamp in timestamps if timestamp is not None]
+            if not values:
+                return summary
+            actual_start = min(timestamps) if timestamps else None
+            actual_end = max(timestamps) if timestamps else None
+            duration = 0.0
+            if actual_start and actual_end:
+                duration = max((actual_end - actual_start).total_seconds() / 3600, 0) + period / 3600
+            summary.update(
+                {
+                    "average": round(float(mean(values)), 2),
+                    "minimum": round(min(values), 2),
+                    "maximum": round(max(values), 2),
+                    "datapoint_count": len(values),
+                    "actual_start": actual_start.isoformat() if actual_start else None,
+                    "actual_end": actual_end.isoformat() if actual_end else None,
+                    "actual_duration_hours": round(duration, 2),
+                    "status": "present",
+                }
+            )
+            return summary
+        except Exception as exc:
+            self._record_error("cloudwatch", exc)
+            summary["status"] = "error"
+            return summary
+
     def _scan_ec2_instances(self) -> list[dict[str, Any]]:
         resources: list[dict[str, Any]] = []
         try:
@@ -203,11 +310,14 @@ class AwsScanner:
                         if not self._in_scope(instance_id):
                             continue
                         tags = _safe_tags(instance.get("Tags"))
-                        avg_cpu = self._metric_average(
+                        launch_time = _ensure_utc(instance.get("LaunchTime"))
+                        cpu_summary = self._metric_summary(
                             "AWS/EC2",
                             "CPUUtilization",
                             [{"Name": "InstanceId", "Value": instance_id}],
+                            start_time=launch_time,
                         )
+                        avg_cpu = cpu_summary.get("average")
                         state = instance.get("State", {}).get("Name", "unknown")
                         resources.append(
                             {
@@ -218,8 +328,13 @@ class AwsScanner:
                                 "state": state,
                                 "tags": tags,
                                 "metrics": {
+                                    "launch_time": launch_time.isoformat() if launch_time else None,
+                                    "cpu_utilization": cpu_summary,
                                     "avg_cpu_14d": avg_cpu,
-                                    "low_utilization_candidate": state == "running" and avg_cpu is not None and avg_cpu < 10,
+                                    "low_utilization_candidate": state == "running"
+                                    and avg_cpu is not None
+                                    and cpu_summary.get("datapoint_count", 0) > 0
+                                    and avg_cpu < 10,
                                 },
                             }
                         )
@@ -250,6 +365,8 @@ class AwsScanner:
                             "metrics": {
                                 "size_gb": volume.get("Size"),
                                 "iops": volume.get("Iops"),
+                                "throughput_mibps": volume.get("Throughput"),
+                                "attachment_count": len(volume.get("Attachments", [])),
                                 "unattached": state == "available",
                             },
                         }
@@ -425,13 +542,21 @@ class AwsScanner:
                 bucket_region = self._bucket_region(client, name)
                 if bucket_region != self.region or not self._in_scope(name):
                     continue
-                has_lifecycle = self._bucket_has_lifecycle(client, name)
+                lifecycle = self._bucket_lifecycle_status(client, name)
                 size_bytes = self._metric_average(
                     "AWS/S3",
                     "BucketSizeBytes",
                     [
                         {"Name": "BucketName", "Value": name},
                         {"Name": "StorageType", "Value": "StandardStorage"},
+                    ],
+                )
+                object_count = self._metric_average(
+                    "AWS/S3",
+                    "NumberOfObjects",
+                    [
+                        {"Name": "BucketName", "Value": name},
+                        {"Name": "StorageType", "Value": "AllStorageTypes"},
                     ],
                 )
                 resources.append(
@@ -444,8 +569,14 @@ class AwsScanner:
                         "tags": {},
                         "metrics": {
                             "bucket_size_bytes": size_bytes,
-                            "has_lifecycle_policy": has_lifecycle,
-                            "missing_lifecycle_policy": not has_lifecycle,
+                            "object_count": object_count,
+                            "lifecycle_status": lifecycle,
+                            "has_lifecycle_policy": True
+                            if lifecycle["status"] == "present"
+                            else False
+                            if lifecycle["status"] == "absent"
+                            else None,
+                            "missing_lifecycle_policy": lifecycle["status"] == "absent",
                         },
                     }
                 )
@@ -465,16 +596,40 @@ class AwsScanner:
             self._record_error("s3-location", exc)
             return None
 
-    def _bucket_has_lifecycle(self, client: Any, bucket_name: str) -> bool:
+    def _bucket_lifecycle_status(self, client: Any, bucket_name: str) -> dict[str, Any]:
         try:
             client.get_bucket_lifecycle_configuration(Bucket=bucket_name)
-            return True
+            return {"status": "present"}
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             if code in {"NoSuchLifecycleConfiguration", "NoSuchLifecycle"}:
-                return False
-            self._record_error("s3-lifecycle", exc)
+                return {"status": "absent", "code": code}
+            permission = "s3:GetLifecycleConfiguration"
+            message = exc.response.get("Error", {}).get("Message", "Lifecycle configuration could not be verified.")
+            self._record_warning("S3", bucket_name, code or "LifecycleInspectionFailed", message, permission)
+            return {
+                "status": "unknown",
+                "code": code or "LifecycleInspectionFailed",
+                "message": message,
+                "permission": permission,
+            }
+        except (BotoCoreError, TimeoutError) as exc:
+            message = "Lifecycle configuration could not be verified."
+            self._record_warning("S3", bucket_name, exc.__class__.__name__, message, "s3:GetLifecycleConfiguration")
+            return {
+                "status": "unknown",
+                "code": exc.__class__.__name__,
+                "message": message,
+                "permission": "s3:GetLifecycleConfiguration",
+            }
+
+    def _bucket_has_lifecycle(self, client: Any, bucket_name: str) -> bool | None:
+        status = self._bucket_lifecycle_status(client, bucket_name)
+        if status["status"] == "present":
+            return True
+        if status["status"] == "absent":
             return False
+        return None
 
     def _scan_nat_gateways(self) -> list[dict[str, Any]]:
         resources: list[dict[str, Any]] = []
@@ -505,6 +660,11 @@ class AwsScanner:
         except Exception as exc:
             self._record_error("nat-gateway", exc)
         return resources
+
+def _ensure_utc(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _client_error_to_scanner_error(exc: ClientError) -> ScannerError:

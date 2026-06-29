@@ -54,6 +54,7 @@ def test_scanner_keeps_results_when_one_service_is_access_denied(monkeypatch: py
     scanner = AwsScanner("us-east-1")
     monkeypatch.setattr(scanner, "_validate_credentials", lambda: None)
     monkeypatch.setattr(scanner, "_metric_average", lambda *args, **kwargs: 2.5)
+    monkeypatch.setattr(scanner, "_scan_billing_context", lambda: {"status": "unavailable"})
 
     class Paginator:
         def __init__(self, pages: list[dict[str, Any]]):
@@ -261,7 +262,7 @@ def test_analyze_websocket_report_flow_with_mocked_scanner_and_groq(
         assert messages == [
             "Scanning AWS resources in us-east-1...",
             "Pulling CloudWatch metrics...",
-            "Analyzing costs with Groq...",
+            "Building deterministic cost report...",
             "Storing results...",
             "Analysis complete",
         ]

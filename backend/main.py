@@ -182,7 +182,7 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
         await progress_manager.publish(analysis_id, "Pulling CloudWatch metrics...")
         scan_result = await run_in_threadpool(lambda: AwsScanner(region, resource_group).scan())
 
-        await progress_manager.publish(analysis_id, "Analyzing costs with Groq...")
+        await progress_manager.publish(analysis_id, "Building deterministic cost report...")
         ai_analysis = await run_in_threadpool(lambda: analyze_costs(scan_result))
 
         await progress_manager.publish(analysis_id, "Storing results...")
@@ -192,13 +192,18 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
             "scan": scan_result,
             "analysis": ai_analysis,
         }
+        savings_display = ai_analysis.get("estimated_monthly_savings_display")
+        if not savings_display:
+            raw_savings = ai_analysis.get("estimated_monthly_savings")
+            savings_display = "Not enough data" if raw_savings is None else str(raw_savings)
         complete_analysis(
             db,
             analysis_id,
             result,
             resources_scanned=ai_analysis.get("resources_scanned", len(scan_result.get("resources", []))),
-            issues_found=ai_analysis.get("issues_found", len(ai_analysis.get("issues", []))),
-            estimated_savings=str(ai_analysis.get("estimated_monthly_savings", "Unknown")),
+            issues_found=ai_analysis.get("confirmed_issues", ai_analysis.get("issues_found", len(ai_analysis.get("issues", [])))),
+            estimated_savings=str(savings_display),
+            status=ai_analysis.get("status", "completed"),
         )
         await progress_manager.publish(analysis_id, "Analysis complete")
     except (ScannerAuthError, ScannerRegionError, ScannerError, RuntimeError) as exc:

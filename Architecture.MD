@@ -18,11 +18,12 @@
                          | Custom JWT auth      |
                          +----+----------+------+
                               |          |
-                    boto3 scan|          | Groq chat completion
+                    boto3 scan|          | optional Groq wording
                               v          v
 +-------------------+   +-------------------+   +------------------+
 | AWS account       |   | Progress WebSocket|   | Groq API          |
-| EC2, EBS, RDS, S3 |   | /ws/progress/{id} |   | Cost analysis     |
+| EC2, EBS, RDS, S3 |   | /ws/progress/{id} |   | explanation text  |
+| Cost Explorer, CW |   |                   |   |                  |
 | ELB, EIP, NAT, CW |   +---------+---------+   +---------+--------+
 +---------+---------+             |                       |
           |                       v                       |
@@ -51,7 +52,7 @@
 | --- | --- | --- |
 | Cloud data | Azure CLI subprocess calls | boto3 native AWS SDK |
 | Scan unit | Azure Resource Group | AWS region, optional AWS Resource Group |
-| AI analysis | OpenAI API | Groq API |
+| Cost analysis | OpenAI API | deterministic AWS rule engine, optional Groq wording |
 | Database | Managed PostgreSQL | SQLite by default, Postgres-ready |
 | Setup | Manual backend/frontend setup | `./start.sh` or `docker compose up --build` |
 
@@ -60,7 +61,9 @@
 - Authenticate app users with custom JWTs.
 - Scan AWS resources through the standard AWS credential chain.
 - Pull CloudWatch utilization metrics for resource-aware recommendations.
+- Pull Cost Explorer account and regional billing context when `ce:GetCostAndUsage` is allowed.
 - Degrade gracefully when one AWS service denies read access.
-- Send resource and metric payloads to Groq for structured JSON analysis.
+- Generate findings, savings, yearly estimates, confidence scores, warnings, pricing status, billing summaries, and AWS command templates deterministically in backend code.
+- Optionally send validated findings to Groq for explanation wording only.
 - Persist every analysis for the signed-in user.
 - Replay progress messages to late WebSocket subscribers.

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ChevronRight, Clock, Loader2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { AnalysisRecord, apiFetch } from "../lib/api";
+import { formatMonthlySavings, formatStatus } from "../lib/format";
 
 export default function History() {
   const navigate = useNavigate();
@@ -56,7 +57,7 @@ export default function History() {
               </div>
               <Pill value={record.status} />
               <span className="text-sm text-slate-300">{record.issues_found} issues</span>
-              <span className="text-sm text-cloud-green">{record.estimated_savings}</span>
+              <span className="text-sm text-cloud-green">{formatMonthlySavings(record.estimated_savings)}</span>
               <ChevronRight className="hidden h-5 w-5 text-slate-500 md:block" aria-hidden="true" />
             </button>
           ))}
@@ -69,8 +70,10 @@ export default function History() {
 function Pill({ value }: { value: string }) {
   const color = value === "completed"
     ? "border-emerald-400/50 text-emerald-200"
-    : value === "failed"
-      ? "border-rose-400/50 text-rose-200"
-      : "border-cloud-orange/50 text-orange-200";
-  return <span className={`w-fit rounded-md border px-2 py-1 text-xs font-semibold uppercase ${color}`}>{value}</span>;
+    : value === "completed_with_warnings"
+      ? "border-amber-400/50 text-amber-200"
+      : value === "failed"
+        ? "border-rose-400/50 text-rose-200"
+        : "border-cloud-orange/50 text-orange-200";
+  return <span className={`w-fit rounded-md border px-2 py-1 text-xs font-semibold uppercase ${color}`}>{formatStatus(value)}</span>;
 }
