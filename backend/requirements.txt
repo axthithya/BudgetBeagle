@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+boto3
+groq
+python-dotenv
+sqlalchemy
+websockets
+psycopg2-binary
+PyJWT
+bcrypt
