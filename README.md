@@ -271,24 +271,26 @@ Treat the report as a decision aid. For example, an "idle" resource might still 
 
 BudgetBeagle needs permission to describe and list resources. It does not need write permissions to scan.
 
-A practical least-privilege starting policy:
+### Minimal Core Scan Policy
+
+This is the minimum policy required for BudgetBeagle to scan resources, collect CloudWatch metrics, and generate findings:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "BudgetBeagleCoreScan",
       "Effect": "Allow",
       "Action": [
+        "sts:GetCallerIdentity",
         "ec2:Describe*",
         "rds:Describe*",
         "s3:ListAllMyBuckets",
         "s3:GetBucketLocation",
-        "s3:GetBucketLifecycleConfiguration",
         "cloudwatch:GetMetricData",
         "cloudwatch:GetMetricStatistics",
         "cloudwatch:ListMetrics",
-        "ce:GetCostAndUsage",
         "elasticloadbalancing:Describe*",
         "resource-groups:ListGroups",
         "resource-groups:ListGroupResources",
@@ -300,7 +302,80 @@ A practical least-privilege starting policy:
 }
 ```
 
+### Extended Read-Only Enrichment Policy (Recommended)
+
+This adds optional permissions that improve report quality. Missing optional permissions produce **warnings, not failures** — your scan will still complete.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BudgetBeagleCoreScan",
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity",
+        "ec2:Describe*",
+        "rds:Describe*",
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics",
+        "elasticloadbalancing:Describe*",
+        "resource-groups:ListGroups",
+        "resource-groups:ListGroupResources",
+        "tag:GetResources"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BudgetBeagleOptionalEnrichment",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetLifecycleConfiguration",
+        "ce:GetCostAndUsage"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+### What each optional permission does
+
+| Permission | What it enables | If missing |
+| --- | --- | --- |
+| `s3:GetLifecycleConfiguration` | Verifies whether S3 buckets have lifecycle policies configured | Lifecycle status shows as "Unknown" with a warning |
+| `ce:GetCostAndUsage` | Retrieves AWS Cost Explorer billing data for account and region spend summaries | Billing tab shows "unavailable" with a warning |
+
+### How to add optional permissions
+
+1. Open the [IAM Console](https://console.aws.amazon.com/iam/).
+2. Find the IAM user or role used by BudgetBeagle.
+3. Open the attached policy (or create a new inline policy).
+4. Add the optional actions listed above to the policy's `Action` array.
+5. Save the policy.
+6. Run the scan again in BudgetBeagle — the dashboard will show updated permission status.
+
+### Scoped S3 permissions
+
+If you want to restrict lifecycle checks to specific buckets:
+
+```json
+{
+  "Sid": "BudgetBeagleScopedS3Lifecycle",
+  "Effect": "Allow",
+  "Action": "s3:GetLifecycleConfiguration",
+  "Resource": "arn:aws:s3:::your-bucket-name"
+}
+```
+
 If a service is denied, BudgetBeagle tries to keep scanning the services it can access and records the scanner error or warning in the analysis payload. If Cost Explorer is denied, inventory scanning still works and the Billing tab explains that account spend could not be verified.
+
+### Debug mode
+
+Set `DEBUG_AWS_ERRORS=true` in `backend/.env` to log detailed AWS error information to the server console during development. Secrets are never logged regardless of this setting. The default is `false`.
 
 ## Other Ways To Run
 

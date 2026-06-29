@@ -11,6 +11,10 @@ export type ScanWarning = {
   code?: string;
   message: string;
   permission?: string;
+  operation?: string;
+  title?: string;
+  resolution?: string;
+  severity?: string;
 };
 
 export type BillingAmount = {
@@ -50,7 +54,9 @@ export type BillingContext = {
 export type ReportConfidence = {
   score: number;
   label: string;
+  level?: string;
   basis?: string;
+  factors?: { name: string; effect: string; reason: string }[];
 };
 
 export type ReportMetrics = {
@@ -147,6 +153,17 @@ export type AnalysisResult = {
     warnings_count?: number;
     notes?: string[];
   };
+};
+
+export type AwsStatus = {
+  connected: boolean;
+  connection_status: "connected" | "connected_with_limited_permissions" | "not_connected";
+  account_id_masked: string | null;
+  identity_type: string | null;
+  identity_name: string | null;
+  default_region: string;
+  required_permissions: { available: string[]; missing: string[] };
+  optional_permissions: { available: string[]; missing: string[] };
 };
 
 export function getToken() {

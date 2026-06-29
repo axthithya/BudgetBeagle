@@ -6,6 +6,7 @@ from typing import Any, Callable
 from botocore.exceptions import BotoCoreError, ClientError
 
 from pricing import REGION_TO_PRICING_LOCATION
+from sanitize import mask_account_id, scrub_sensitive_text
 
 
 WarnFn = Callable[[str, str | None, str, str, str | None], None]
@@ -28,7 +29,7 @@ def scan_billing_context(
     context = {
         "status": "unavailable",
         "source": "AWS Cost Explorer",
-        "account_id": account_id,
+        "account_id": mask_account_id(account_id),
         "selected_region": selected_region,
         "selected_region_label": region_label(selected_region),
         "period": {
@@ -71,15 +72,15 @@ def scan_billing_context(
         return context
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "CostExplorerError")
-        message = exc.response.get("Error", {}).get("Message", "Cost Explorer data could not be collected.")
-        warn("Cost Explorer", account_id, code, message, "ce:GetCostAndUsage")
-        context["error"] = {"code": code, "message": message, "permission": "ce:GetCostAndUsage"}
+        safe_message = "Cost Explorer data could not be collected."
+        warn("Cost Explorer", None, code, safe_message, "ce:GetCostAndUsage")
+        context["error"] = {"code": code, "message": safe_message, "permission": "ce:GetCostAndUsage"}
         return context
     except (BotoCoreError, OSError) as exc:
         code = exc.__class__.__name__
-        message = "Cost Explorer data could not be collected."
-        warn("Cost Explorer", account_id, code, message, "ce:GetCostAndUsage")
-        context["error"] = {"code": code, "message": message, "permission": "ce:GetCostAndUsage"}
+        safe_message = "Cost Explorer data could not be collected."
+        warn("Cost Explorer", None, code, safe_message, "ce:GetCostAndUsage")
+        context["error"] = {"code": code, "message": safe_message, "permission": "ce:GetCostAndUsage"}
         return context
 
 

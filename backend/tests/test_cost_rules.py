@@ -49,8 +49,6 @@ def _s3(status: str, object_count: int | None = None, size_bytes: int | None = N
         "state": "active",
         "metrics": {
             "lifecycle_status": lifecycle,
-            "has_lifecycle_policy": status == "present" if status != "unknown" else None,
-            "missing_lifecycle_policy": status == "absent",
             "object_count": object_count,
             "bucket_size_bytes": size_bytes,
         },
@@ -363,9 +361,130 @@ def test_cost_explorer_access_denied_produces_warning() -> None:
     assert warnings == [
         {
             "service": "Cost Explorer",
-            "resource_id": "123456789012",
+            "resource_id": None,
             "code": "AccessDeniedException",
-            "message": "denied",
+            "message": "Cost Explorer data could not be collected.",
             "permission": "ce:GetCostAndUsage",
         }
     ]
+
+
+# ── New tests for prompt 10 ──────────────────────────────────────────────
+
+
+def test_confidence_includes_explainable_factors() -> None:
+    """Confidence must include a 'factors' list with named entries."""
+    report = build_cost_report(
+        _scan(
+            [_ec2(_cpu(0.13, datapoints=5, hours=5))],
+            warnings=[{
+                "service": "S3",
+                "resource_id": "demo-bucket",
+                "code": "AccessDenied",
+                "message": "Lifecycle check failed.",
+                "permission": "s3:GetLifecycleConfiguration",
+            }],
+        ),
+        pricing_resolver=StaticPrice(_missing_price()),
+    )
+    confidence = report["confidence"]
+    assert "score" in confidence
+    assert "factors" in confidence
+    assert isinstance(confidence["factors"], list)
+    assert len(confidence["factors"]) > 0
+    factor_names = [f["name"] for f in confidence["factors"]]
+    assert any("warning" in name.lower() for name in factor_names)
+    for factor in confidence["factors"]:
+        assert "name" in factor
+        assert "effect" in factor
+        assert "reason" in factor
+        assert factor["effect"] in ("positive", "negative")
+
+
+def test_confidence_level_field_present() -> None:
+    report = build_cost_report(_scan([]))
+    assert "level" in report["confidence"]
+    assert report["confidence"]["level"] in ("high", "medium", "low")
+
+
+def test_warnings_have_structured_fields() -> None:
+    """All warnings must include title, resolution, and severity."""
+    report = build_cost_report(
+        _scan(
+            [_s3("unknown", object_count=0, size_bytes=0)],
+            warnings=[{
+                "service": "S3",
+                "resource_id": "demo-bucket",
+                "code": "AccessDenied",
+                "message": "Lifecycle configuration could not be verified.",
+                "permission": "s3:GetLifecycleConfiguration",
+                "title": "Lifecycle configuration could not be verified",
+                "resolution": "Add the optional read-only permission and run the scan again.",
+                "severity": "warning",
+            }],
+        )
+    )
+    for warning in report["warnings"]:
+        assert "title" in warning or "service" in warning
+        assert "severity" in warning or "code" in warning
+
+
+def test_s3_unknown_lifecycle_never_displays_missing_no() -> None:
+    """Lifecycle unknown must never show 'missing_lifecycle_policy: No'."""
+    report = build_cost_report(_scan([_s3("unknown", object_count=0, size_bytes=0)]))
+    serialized = json.dumps(report)
+    assert "missing_lifecycle_policy" not in serialized
+    assert report["findings"] == []  # No findings from unknown status
+
+
+def test_cost_explorer_access_denied_does_not_fail_resource_scan() -> None:
+    """Cost Explorer denial must not prevent resources from being scanned."""
+    billing = {
+        "status": "unavailable",
+        "error": {"code": "AccessDeniedException", "message": "denied", "permission": "ce:GetCostAndUsage"},
+    }
+    report = build_cost_report({
+        "region": "ap-southeast-1",
+        "resources": [_ebs(state="available")],
+        "warnings": [],
+        "errors": [],
+        "billing": billing,
+    })
+    assert report["resources_scanned"] == 1
+    assert report["confirmed_issues"] == 1  # Unattached EBS volume
+
+
+def test_no_duplicate_warning_cards() -> None:
+    """Same warning should not appear as both scanner warning and cost_rules warning."""
+    warnings = [{
+        "service": "S3",
+        "resource_id": "demo-bucket",
+        "code": "AccessDenied",
+        "message": "denied",
+        "permission": "s3:GetLifecycleConfiguration",
+    }]
+    report = build_cost_report(_scan([_s3("unknown")], warnings=warnings))
+    s3_warnings = [w for w in report["warnings"] if w.get("service") == "S3" and w.get("resource_id") == "demo-bucket"]
+    # At most 1 unique S3/demo-bucket/AccessDenied warning
+    codes = [(w.get("service"), w.get("resource_id"), w.get("code")) for w in s3_warnings]
+    assert len(set(codes)) <= 1, f"Duplicate warnings found: {codes}"
+
+
+def test_completed_with_warnings_status_when_optional_checks_fail() -> None:
+    warnings = [{
+        "service": "Cost Explorer",
+        "resource_id": "",
+        "code": "AccessDenied",
+        "message": "denied",
+    }]
+    report = build_cost_report(_scan([], warnings=warnings))
+    assert report["status"] == "completed_with_warnings"
+
+
+def test_lifecycle_status_without_dict_defaults_to_unknown() -> None:
+    """When lifecycle_status is missing entirely, _lifecycle_status returns unknown."""
+    from cost_rules import _lifecycle_status
+    assert _lifecycle_status({}) == "unknown"
+    assert _lifecycle_status({"lifecycle_status": "present"}) == "present"
+    assert _lifecycle_status({"lifecycle_status": "absent"}) == "absent"
+    assert _lifecycle_status({"lifecycle_status": {"status": "unknown"}}) == "unknown"

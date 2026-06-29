@@ -4,13 +4,17 @@ import {
   AlertTriangle,
   BarChart3,
   Check,
+  ChevronDown,
+  ChevronUp,
   ClipboardList,
   Copy,
   Database,
   Gauge,
   History,
+  Info,
   Layers,
   Loader2,
+  RefreshCcw,
   Terminal,
 } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
@@ -122,6 +126,13 @@ export default function Report() {
           <div className="flex flex-wrap gap-2">
             <StatusBadge value={record.status} />
             <Link
+              to="/"
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-cloud-line px-3 text-sm text-slate-200 hover:border-cloud-cyan"
+            >
+              <RefreshCcw className="h-4 w-4" aria-hidden="true" />
+              Scan again
+            </Link>
+            <Link
               to="/history"
               className="inline-flex h-9 items-center gap-2 rounded-md border border-cloud-line px-3 text-sm text-slate-200 hover:border-cloud-cyan"
             >
@@ -197,7 +208,7 @@ function OverviewTab({ result, billing, warnings, confidence, findings }: { resu
           <h2 className="text-lg font-semibold">Summary</h2>
         </div>
         <p className="mt-3 text-sm leading-7 text-slate-300">{result.analysis.summary}</p>
-        {confidence && <p className="mt-3 text-sm text-slate-400">Confidence: {confidence.score}% · {confidence.basis}</p>}
+        {confidence && <ConfidenceSection confidence={confidence} />}
       </section>
 
       <section className="grid gap-4 lg:grid-cols-3">
@@ -363,17 +374,85 @@ function WarningSummary({ warnings, expanded = false }: { warnings: ScanWarning[
         <AlertTriangle className="h-5 w-5" aria-hidden="true" />
         <h2 className="font-semibold text-white">Scan completed with warnings</h2>
       </div>
-      <div className="space-y-3">
-        {visible.map((warning, index) => (
-          <div key={`${warning.service}-${warning.resource_id ?? index}-${warning.code ?? index}`} className="text-sm leading-6">
-            <p className="font-medium text-white">{warning.service}{warning.resource_id ? ` / ${warning.resource_id}` : ""}</p>
-            <p>{warning.message}</p>
-            {warning.permission && <p className="text-amber-100/80">Permission: {warning.permission}</p>}
-          </div>
-        ))}
-      </div>
-      {!expanded && warnings.length > visible.length && <p className="mt-3 text-sm text-amber-100/80">{warnings.length - visible.length} more warnings in the Warnings tab.</p>}
+      {!expanded ? (
+        <div className="space-y-2">
+          {visible.map((warning, index) => (
+            <p key={`${warning.service}-${warning.resource_id ?? index}-${warning.code ?? index}`} className="text-sm">
+              <span className="font-medium text-white">{warning.title ?? warning.service}</span>
+              {warning.resource_id ? ` — ${warning.resource_id}` : ""}
+            </p>
+          ))}
+          {warnings.length > visible.length && (
+            <p className="text-sm text-amber-100/80">{warnings.length - visible.length} more in the Warnings tab.</p>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {visible.map((warning, index) => (
+            <WarningCard key={`${warning.service}-${warning.resource_id ?? index}-${warning.code ?? index}`} warning={warning} />
+          ))}
+        </div>
+      )}
     </section>
+  );
+}
+
+function WarningCard({ warning }: { warning: ScanWarning }) {
+  return (
+    <div className="rounded-lg border border-amber-400/20 bg-amber-500/5 p-4">
+      <h3 className="font-semibold text-white">{warning.title ?? `${warning.service} check unavailable`}</h3>
+      {warning.resource_id && (
+        <div className="mt-2 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
+          <span className="text-amber-200/70">Resource:</span>
+          <span className="text-white">{warning.resource_id}</span>
+        </div>
+      )}
+      {warning.permission && (
+        <div className="mt-1 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
+          <span className="text-amber-200/70">Missing permission:</span>
+          <code className="text-amber-200">{warning.permission}</code>
+        </div>
+      )}
+      <div className="mt-1 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
+        <span className="text-amber-200/70">Impact:</span>
+        <span>{warning.message}</span>
+      </div>
+      {warning.resolution && (
+        <div className="mt-1 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
+          <span className="text-amber-200/70">Resolution:</span>
+          <span>{warning.resolution}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConfidenceSection({ confidence }: { confidence: { score: number; label: string; basis?: string; factors?: { name: string; effect: string; reason: string }[] } }) {
+  const [open, setOpen] = useState(false);
+  const factors = confidence.factors ?? [];
+  return (
+    <div className="mt-3">
+      <button type="button" onClick={() => setOpen(!open)} className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white">
+        <Info className="h-4 w-4" />
+        Confidence: {confidence.score}% — {confidence.label}
+        {open ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+      </button>
+      {open && factors.length > 0 && (
+        <div className="mt-3 space-y-2 rounded-lg border border-cloud-line bg-cloud-ink p-4">
+          <p className="text-xs font-semibold uppercase text-slate-500">Confidence factors</p>
+          {factors.map((factor, i) => (
+            <div key={i} className="flex items-start gap-2 text-sm">
+              <span className={`mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full ${factor.effect === "positive" ? "bg-emerald-400" : "bg-amber-400"}`} />
+              <div>
+                <span className="font-medium text-slate-200">{factor.name}</span>
+                <span className="text-slate-400"> — {factor.reason}</span>
+              </div>
+            </div>
+          ))}
+          {confidence.basis && <p className="mt-2 text-xs text-slate-500">{confidence.basis}</p>}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -494,17 +573,64 @@ function StatusBadge({ value }: { value: string }) {
 function normalizeResource(resource: unknown) {
   const item = (resource && typeof resource === "object" ? resource : {}) as Record<string, unknown>;
   const metrics = item.metrics && typeof item.metrics === "object" ? item.metrics as Record<string, unknown> : {};
-  const compactMetrics = Object.entries(metrics)
-    .filter(([, value]) => value !== null && value !== undefined && typeof value !== "object")
-    .slice(0, 5)
-    .map(([key, value]) => `${key}: ${formatValue(value)}`)
-    .join(" · ");
+  const service = String(item.service ?? "AWS").toUpperCase();
+
+  let metricsDisplay = "";
+
+  if (service === "EC2") {
+    const cpu = metrics.cpu_utilization as Record<string, unknown> | undefined;
+    const avgCpu = cpu?.average ?? metrics.avg_cpu_14d;
+    const dpCount = cpu?.datapoint_count ?? (avgCpu != null ? "?" : 0);
+    const duration = cpu?.actual_duration_hours;
+    const launchTime = formatDate(cpu?.instance_launch_time ?? metrics.launch_time);
+    const assessment = avgCpu != null && Number(dpCount) > 0 && Number(avgCpu) < 10 ? "Review candidate" : avgCpu == null ? "No data" : "Normal utilization";
+    if (Number(dpCount) < 24 && avgCpu != null) {
+      metricsDisplay = `Instance type: ${item.type_or_sku ?? "-"} · State: ${item.state ?? "-"} · Launch time: ${launchTime} · Average CPU: ${fmtPct(avgCpu)} · Datapoints: ${dpCount}${duration != null ? ` · Observed duration: ${fmtHours(duration)}` : ""} · Assessment: More monitoring required`;
+    } else {
+      metricsDisplay = `Instance type: ${item.type_or_sku ?? "-"} · State: ${item.state ?? "-"} · Launch time: ${launchTime} · Average CPU: ${fmtPct(avgCpu)} · Datapoints: ${dpCount}${duration != null ? ` · Observed duration: ${fmtHours(duration)}` : ""} · Assessment: ${assessment}`;
+    }
+  } else if (service === "EBS") {
+    const iops = metrics.iops;
+    const throughput = metrics.throughput_mibps ?? metrics.throughput;
+    const size = metrics.size_gb;
+    const attachCount = metrics.attachment_count ?? (metrics.unattached ? 0 : "?");
+    const isGp3 = String(item.type_or_sku ?? "").toLowerCase() === "gp3";
+    const iopsLabel = isGp3 && (iops === 3000 || iops == null) ? "3,000 — included gp3 baseline" : iops != null ? String(iops) : "Unknown";
+    const tpLabel = isGp3 && (throughput === 125 || throughput == null) ? "125 MiB/s — included gp3 baseline" : throughput != null ? `${throughput} MiB/s` : "Unknown";
+    const assessment = metrics.unattached ? "Unattached — review for deletion" : "Normal configuration";
+    metricsDisplay = `Volume type: ${item.type_or_sku ?? "-"} · Size: ${size != null ? `${size} GiB` : "Unknown"} · State: ${item.state ?? "-"} · IOPS: ${iopsLabel} · Throughput: ${tpLabel} · Attachments: ${attachCount} · Assessment: ${assessment}`;
+  } else if (service === "S3") {
+    const lifecycle = metrics.lifecycle_status as Record<string, unknown> | undefined;
+    let lcStatus = "Unknown";
+    let lcReason = "";
+    if (lifecycle && typeof lifecycle === "object") {
+      const st = String(lifecycle.status ?? "unknown").toLowerCase();
+      if (st === "present") lcStatus = "Configured";
+      else if (st === "absent") lcStatus = "Not configured";
+      else { lcStatus = "Unknown"; lcReason = lifecycle.code === "AccessDenied" ? "Permission denied" : String(lifecycle.message ?? "Could not verify"); }
+    } else if (typeof metrics.lifecycle_status === "string") {
+      const st = metrics.lifecycle_status as string;
+      if (st === "present") lcStatus = "Configured";
+      else if (st === "absent") lcStatus = "Not configured";
+      else lcStatus = "Unknown";
+    }
+    const sizeBytes = metrics.bucket_size_bytes;
+    metricsDisplay = `State: Active · Lifecycle policy: ${lcStatus}${lcReason ? ` (${lcReason})` : ""} · Current size: ${sizeBytes != null ? formatBytes(sizeBytes) : "No data"} · Assessment: ${lcStatus === "Unknown" ? "Could not fully inspect" : lcStatus === "Not configured" ? "Review lifecycle policy" : "Normal"}`;
+  } else {
+    // Generic fallback
+    const entries = Object.entries(metrics)
+      .filter(([, value]) => value !== null && value !== undefined && typeof value !== "object")
+      .slice(0, 5)
+      .map(([key, value]) => `${humanLabel(key)}: ${formatValue(value)}`);
+    metricsDisplay = entries.join(" · ") || "No scalar metrics";
+  }
+
   return {
     service: String(item.service ?? "AWS"),
     id: String(item.id ?? "unknown"),
     type: String(item.type_or_sku ?? "-"),
     state: String(item.state ?? "-"),
-    metrics: compactMetrics || "No scalar metrics",
+    metrics: metricsDisplay,
   };
 }
 
@@ -539,4 +665,42 @@ function formatValue(value: unknown): string {
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+function humanLabel(key: string): string {
+  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function fmtPct(value: unknown): string {
+  if (value == null) return "No data";
+  const num = Number(value);
+  return Number.isFinite(num) ? `${num.toFixed(2)}%` : "No data";
+}
+
+function fmtHours(value: unknown): string {
+  if (value == null) return "Unknown";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "Unknown";
+  if (num < 1) return "less than 1 hour";
+  return `${num.toFixed(1)} hours`;
+}
+
+function formatDate(value: unknown): string {
+  if (!value) return "Unknown";
+  try {
+    const d = new Date(String(value));
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return String(value);
+  }
+}
+
+function formatBytes(value: unknown): string {
+  if (value == null) return "No data";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "No data";
+  if (num === 0) return "0 bytes";
+  const units = ["bytes", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(num) / Math.log(1024)), units.length - 1);
+  return `${(num / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }

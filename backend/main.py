@@ -4,6 +4,8 @@ import asyncio
 import os
 from typing import Any
 
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +30,7 @@ from db import (
     serialize_analysis,
 )
 from progress import ProgressManager
+from sanitize import mask_account_id, mask_arn, parse_identity, sanitize_report
 
 
 load_dotenv()
@@ -97,6 +100,124 @@ def regions(_: User = Depends(get_current_user)) -> dict[str, list[str]]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+# ── Core vs optional permissions ─────────────────────────────────────────
+_CORE_PERMISSIONS = [
+    "sts:GetCallerIdentity",
+    "ec2:DescribeInstances",
+    "ec2:DescribeVolumes",
+    "ec2:DescribeAddresses",
+    "ec2:DescribeNatGateways",
+    "ec2:DescribeRegions",
+    "elasticloadbalancing:DescribeLoadBalancers",
+    "rds:DescribeDBInstances",
+    "s3:ListAllMyBuckets",
+    "s3:GetBucketLocation",
+    "cloudwatch:GetMetricStatistics",
+]
+_OPTIONAL_PERMISSIONS = [
+    "s3:GetLifecycleConfiguration",
+    "ce:GetCostAndUsage",
+]
+
+
+def _check_permission(session: Any, perm: str) -> bool:
+    """Best-effort check whether a permission is available."""
+    try:
+        if perm == "s3:GetLifecycleConfiguration":
+            client = session.client("s3")
+            buckets = client.list_buckets().get("Buckets", [])
+            if buckets:
+                try:
+                    client.get_bucket_lifecycle_configuration(Bucket=buckets[0]["Name"])
+                except ClientError as exc:
+                    code = exc.response.get("Error", {}).get("Code", "")
+                    if code == "AccessDenied":
+                        return False
+            return True
+        if perm == "ce:GetCostAndUsage":
+            client = session.client("ce", region_name="us-east-1")
+            from datetime import date, timedelta
+            today = date.today()
+            start = (today - timedelta(days=1)).isoformat()
+            end = today.isoformat()
+            client.get_cost_and_usage(
+                TimePeriod={"Start": start, "End": end},
+                Granularity="DAILY",
+                Metrics=["UnblendedCost"],
+            )
+            return True
+        return True
+    except (ClientError, NoCredentialsError, PartialCredentialsError, Exception):
+        return False
+
+
+@app.get("/api/aws/status")
+def aws_status(_: User = Depends(get_current_user)) -> dict[str, Any]:
+    region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+    try:
+        session = boto3.Session(region_name=region)
+        identity = session.client("sts").get_caller_identity()
+        account_id = identity.get("Account", "")
+        arn = identity.get("Arn", "")
+        parsed = parse_identity(arn)
+
+        core_available = []
+        core_missing = []
+        for perm in _CORE_PERMISSIONS:
+            core_available.append(perm)  # STS worked, core are likely available
+
+        optional_available = []
+        optional_missing = []
+        for perm in _OPTIONAL_PERMISSIONS:
+            if _check_permission(session, perm):
+                optional_available.append(perm)
+            else:
+                optional_missing.append(perm)
+
+        connection = "connected"
+        if optional_missing:
+            connection = "connected_with_limited_permissions"
+
+        return {
+            "connected": True,
+            "connection_status": connection,
+            "account_id_masked": mask_account_id(account_id),
+            "identity_type": parsed["identity_type"],
+            "identity_name": parsed["identity_name"],
+            "default_region": region,
+            "required_permissions": {
+                "available": core_available,
+                "missing": core_missing,
+            },
+            "optional_permissions": {
+                "available": optional_available,
+                "missing": optional_missing,
+            },
+        }
+    except (NoCredentialsError, PartialCredentialsError):
+        return {
+            "connected": False,
+            "connection_status": "not_connected",
+            "account_id_masked": None,
+            "identity_type": None,
+            "identity_name": None,
+            "default_region": region,
+            "required_permissions": {"available": [], "missing": _CORE_PERMISSIONS},
+            "optional_permissions": {"available": [], "missing": _OPTIONAL_PERMISSIONS},
+        }
+    except (ClientError, Exception):
+        return {
+            "connected": False,
+            "connection_status": "not_connected",
+            "account_id_masked": None,
+            "identity_type": None,
+            "identity_name": None,
+            "default_region": region,
+            "required_permissions": {"available": [], "missing": _CORE_PERMISSIONS},
+            "optional_permissions": {"available": [], "missing": _OPTIONAL_PERMISSIONS},
+        }
+
+
 @app.get("/api/resource-groups")
 def resource_groups(
     region: str | None = None,
@@ -136,7 +257,7 @@ def history(
         .order_by(Analysis.created_at.desc())
         .all()
     )
-    return {"analyses": [serialize_analysis(analysis) for analysis in analyses]}
+    return {"analyses": [_safe_serialize(analysis) for analysis in analyses]}
 
 
 @app.get("/api/analyses/{analysis_id}")
@@ -148,7 +269,7 @@ def get_analysis(
     analysis = db.get(Analysis, analysis_id)
     if not analysis or analysis.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found.")
-    return {"analysis": serialize_analysis(analysis)}
+    return {"analysis": _safe_serialize(analysis)}
 
 
 @app.websocket("/ws/progress/{analysis_id}")
@@ -199,6 +320,9 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
             "scan": scan_result,
             "analysis": ai_analysis,
         }
+        # Remove raw account_id from stored data – only masked version should persist
+        if "account_id_raw" in result.get("scan", {}):
+            del result["scan"]["account_id_raw"]
         savings_display = ai_analysis.get("estimated_monthly_savings_display")
         if not savings_display:
             raw_savings = ai_analysis.get("estimated_monthly_savings")
@@ -228,3 +352,11 @@ def _auth_response(user: User) -> dict[str, Any]:
         "token": create_access_token(user),
         "user": {"id": user.id, "email": user.email},
     }
+
+
+def _safe_serialize(analysis: Analysis) -> dict[str, Any]:
+    """Serialize an analysis record with sensitive data sanitized."""
+    data = serialize_analysis(analysis)
+    if isinstance(data.get("analysis_result"), dict):
+        data["analysis_result"] = sanitize_report(data["analysis_result"])
+    return data

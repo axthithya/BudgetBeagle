@@ -13,6 +13,12 @@ from botocore.exceptions import (
     NoCredentialsError,
     PartialCredentialsError,
 )
+from sanitize import (
+    build_structured_warning,
+    mask_account_id,
+    parse_identity,
+    scrub_sensitive_text,
+)
 
 
 class ScannerError(Exception):
@@ -58,9 +64,13 @@ class AwsScanner:
         self.resource_group = resource_group
         self.session = boto3.Session(region_name=region)
         self.errors: list[dict[str, str]] = []
-        self.warnings: list[dict[str, str]] = []
+        self.warnings: list[dict[str, Any]] = []
         self._resource_group_arns: set[str] | None = None
         self.account_id: str | None = None
+        self.account_id_masked: str | None = None
+        self.identity_arn: str | None = None
+        self.identity_type: str | None = None
+        self.identity_name: str | None = None
 
     @staticmethod
     def enabled_regions() -> list[str]:
@@ -113,7 +123,10 @@ class AwsScanner:
         return {
             "region": self.region,
             "resource_group": self.resource_group,
-            "account_id": self.account_id,
+            "account_id": self.account_id_masked,
+            "account_id_raw": self.account_id,
+            "identity_type": self.identity_type,
+            "identity_name": self.identity_name,
             "billing": self._scan_billing_context(),
             "resources": resources,
             "errors": self.errors,
@@ -124,6 +137,11 @@ class AwsScanner:
         try:
             identity = self.session.client("sts").get_caller_identity()
             self.account_id = identity.get("Account")
+            self.account_id_masked = mask_account_id(self.account_id)
+            self.identity_arn = identity.get("Arn")
+            parsed = parse_identity(self.identity_arn)
+            self.identity_type = parsed["identity_type"]
+            self.identity_name = parsed["identity_name"]
         except (NoCredentialsError, PartialCredentialsError) as exc:
             raise ScannerAuthError("AWS credentials are missing or incomplete.") from exc
         except ClientError as exc:
@@ -145,7 +163,7 @@ class AwsScanner:
         if isinstance(exc, ClientError):
             error = exc.response.get("Error", {})
             code = error.get("Code", "ClientError")
-            message = error.get("Message", message)
+            message = scrub_sensitive_text(error.get("Message", message))
             self.errors.append({"service": service, "code": code, "message": message})
             return
         if isinstance(exc, (NoCredentialsError, PartialCredentialsError)):
@@ -162,15 +180,28 @@ class AwsScanner:
         code: str,
         message: str,
         permission: str | None = None,
+        *,
+        operation: str | None = None,
+        title: str | None = None,
+        resolution: str | None = None,
+        severity: str = "warning",
     ) -> None:
-        warning = {
-            "service": service,
-            "resource_id": resource_id or "",
-            "code": code,
-            "message": message,
-        }
-        if permission:
-            warning["permission"] = permission
+        warning = build_structured_warning(
+            service=service,
+            resource_id=resource_id,
+            operation=operation,
+            code=code,
+            permission=permission,
+            title=title,
+            message=message,
+            resolution=resolution,
+            severity=severity,
+        )
+        # Deduplicate
+        key = (warning["service"], warning["resource_id"], warning["code"])
+        for existing in self.warnings:
+            if (existing["service"], existing["resource_id"], existing["code"]) == key:
+                return
         self.warnings.append(warning)
 
     def _load_resource_group_scope(self) -> None:
@@ -571,12 +602,6 @@ class AwsScanner:
                             "bucket_size_bytes": size_bytes,
                             "object_count": object_count,
                             "lifecycle_status": lifecycle,
-                            "has_lifecycle_policy": True
-                            if lifecycle["status"] == "present"
-                            else False
-                            if lifecycle["status"] == "absent"
-                            else None,
-                            "missing_lifecycle_policy": lifecycle["status"] == "absent",
                         },
                     }
                 )
@@ -605,21 +630,31 @@ class AwsScanner:
             if code in {"NoSuchLifecycleConfiguration", "NoSuchLifecycle"}:
                 return {"status": "absent", "code": code}
             permission = "s3:GetLifecycleConfiguration"
-            message = exc.response.get("Error", {}).get("Message", "Lifecycle configuration could not be verified.")
-            self._record_warning("S3", bucket_name, code or "LifecycleInspectionFailed", message, permission)
+            safe_message = "Lifecycle configuration could not be verified."
+            self._record_warning(
+                "S3", bucket_name, code or "LifecycleInspectionFailed", safe_message, permission,
+                operation="GetBucketLifecycleConfiguration",
+                title="Lifecycle configuration could not be verified",
+                resolution="Add the optional read-only permission and run the scan again.",
+            )
             return {
                 "status": "unknown",
                 "code": code or "LifecycleInspectionFailed",
-                "message": message,
+                "message": safe_message,
                 "permission": permission,
             }
         except (BotoCoreError, TimeoutError) as exc:
-            message = "Lifecycle configuration could not be verified."
-            self._record_warning("S3", bucket_name, exc.__class__.__name__, message, "s3:GetLifecycleConfiguration")
+            safe_message = "Lifecycle configuration could not be verified."
+            self._record_warning(
+                "S3", bucket_name, exc.__class__.__name__, safe_message, "s3:GetLifecycleConfiguration",
+                operation="GetBucketLifecycleConfiguration",
+                title="Lifecycle configuration could not be verified",
+                resolution="Add the optional read-only permission and run the scan again.",
+            )
             return {
                 "status": "unknown",
                 "code": exc.__class__.__name__,
-                "message": message,
+                "message": safe_message,
                 "permission": "s3:GetLifecycleConfiguration",
             }
 

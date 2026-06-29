@@ -6,6 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from pricing import Ec2PriceResolver, PricingQuote
+from sanitize import build_structured_warning
 
 
 MONTHLY_HOURS = 730
@@ -509,14 +510,17 @@ def _finding(
 def _scan_warnings(scan_result: dict[str, Any]) -> list[dict[str, Any]]:
     warnings = [dict(item) for item in scan_result.get("warnings", [])]
     for error in scan_result.get("errors", []):
-        warnings.append(
-            {
-                "service": error.get("service", "unknown"),
-                "resource_id": error.get("resource_id"),
-                "code": error.get("code", "ScanWarning"),
-                "message": error.get("message", "A service check could not be completed."),
-            }
+        warning = build_structured_warning(
+            service=error.get("service", "unknown"),
+            resource_id=error.get("resource_id"),
+            code=error.get("code", "ScanWarning"),
+            message=error.get("message", "A service check could not be completed."),
+            severity="warning",
         )
+        # Deduplicate
+        key = (warning["service"], warning["resource_id"], warning["code"])
+        if not any((w.get("service"), w.get("resource_id"), w.get("code")) == key for w in warnings):
+            warnings.append(warning)
     return warnings
 
 
@@ -524,16 +528,20 @@ def _s3_lifecycle_unknown_warning(bucket: str, metrics: dict[str, Any]) -> dict[
     lifecycle = metrics.get("lifecycle_status") if isinstance(metrics.get("lifecycle_status"), dict) else {}
     code = lifecycle.get("code") or metrics.get("lifecycle_error_code") or "Unknown"
     permission = lifecycle.get("permission") or metrics.get("lifecycle_permission") or "s3:GetLifecycleConfiguration"
-    return {
-        "service": "S3",
-        "resource_id": bucket,
-        "code": code,
-        "permission": permission,
-        "message": (
+    return build_structured_warning(
+        service="S3",
+        resource_id=bucket,
+        operation="GetBucketLifecycleConfiguration",
+        code=code,
+        permission=permission,
+        title="S3 lifecycle configuration unavailable",
+        message=(
             "BudgetBeagle could not verify the bucket lifecycle configuration because "
-            f"the IAM identity lacks permission or inspection failed. Required permission: {permission}."
+            f"the IAM identity lacks permission or inspection failed."
         ),
-    }
+        resolution="Add the optional read-only permission and run the scan again.",
+        severity="warning",
+    )
 
 
 def _new_warnings(existing: list[dict[str, Any]], additions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -596,19 +604,80 @@ def _period_average(amount: Any, billing: dict[str, Any]) -> float | None:
 
 
 def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str, Any]], billing: dict[str, Any]) -> dict[str, Any]:
+    factors: list[dict[str, str]] = []
+
+    # --- Finding evidence scores ---
     if findings:
         score = round(sum(_confidence_score(str(item.get("confidence") or "low")) for item in findings) / len(findings))
+        avg_label = "high" if score >= 80 else "medium" if score >= 65 else "low"
+        factors.append({
+            "name": "Finding evidence quality",
+            "effect": "positive" if avg_label != "low" else "negative",
+            "reason": f"Average finding confidence is {avg_label} ({score}%).",
+        })
     else:
         score = 90
-    score -= min(len(warnings) * 5, 25)
+        factors.append({
+            "name": "Resource discovery",
+            "effect": "positive",
+            "reason": "No findings were generated; baseline confidence is high.",
+        })
+
+    # --- Warning penalty ---
+    warning_count = len(warnings)
+    warning_penalty = min(warning_count * 5, 25)
+    score -= warning_penalty
+    if warning_count > 0:
+        factors.append({
+            "name": "Scan warnings",
+            "effect": "negative",
+            "reason": f"{warning_count} warning(s) reduced confidence by {warning_penalty} points.",
+        })
+
+    # --- Billing penalty ---
     if billing.get("status") not in {"available", None}:
         score -= 10
+        factors.append({
+            "name": "Cost Explorer",
+            "effect": "negative",
+            "reason": "Billing permission was unavailable.",
+        })
+    elif billing.get("status") == "available":
+        factors.append({
+            "name": "Cost Explorer",
+            "effect": "positive",
+            "reason": "Billing data was available.",
+        })
+
+    # --- Metric duration factors ---
+    for finding in findings:
+        evidence = finding.get("evidence", {})
+        duration_str = evidence.get("Actual covered duration", "")
+        if "less than" in str(duration_str) or "0." in str(duration_str):
+            factors.append({
+                "name": f"{finding.get('service', 'Unknown')} metric duration",
+                "effect": "negative",
+                "reason": f"Only {duration_str} of data were available for {finding.get('resource_id', 'a resource')}.",
+            })
+            break  # Avoid flooding factors
+
+    # --- Resource scan coverage ---
+    services_scanned = {f.get("service") for f in findings if f.get("service")}
+    if services_scanned:
+        factors.append({
+            "name": "Resource discovery",
+            "effect": "positive",
+            "reason": f"Scans completed for: {', '.join(sorted(services_scanned))}.",
+        })
+
     score = max(35, min(95, score))
     label = "High" if score >= 80 else "Medium" if score >= 65 else "Low"
     return {
         "score": score,
         "label": label,
+        "level": label.lower(),
         "basis": "Derived from finding evidence confidence, scan warnings, and billing data availability.",
+        "factors": factors,
     }
 
 
@@ -677,10 +746,7 @@ def _lifecycle_status(metrics: dict[str, Any]) -> str:
         return str(status.get("status") or "unknown").lower()
     if isinstance(status, str):
         return status.lower()
-    if metrics.get("has_lifecycle_policy") is True:
-        return "present"
-    if metrics.get("has_lifecycle_policy") is False or metrics.get("missing_lifecycle_policy") is True:
-        return "absent"
+    # No fallback to ambiguous booleans – treat as unknown
     return "unknown"
 
 
