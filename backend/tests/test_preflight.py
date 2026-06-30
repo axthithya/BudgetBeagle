@@ -178,9 +178,9 @@ def test_analyze_report_flow_with_mocked_scanner_and_groq(monkeypatch: pytest.Mo
             "estimated_monthly_savings": 42.0,
             "estimated_monthly_savings_display": "$42.00/month",
             "findings": [
-                {"service": "EC2", "resource_id": "i-idle", "issue_type": "Low EC2 CPU", "severity": "medium", "confidence": "medium", "estimated_monthly_savings": 20.0, "estimated_monthly_savings_display": "$20.00/month"},
-                {"service": "EBS", "resource_id": "vol-unattached", "issue_type": "Unattached EBS", "severity": "high", "confidence": "high", "estimated_monthly_savings": 12.0, "estimated_monthly_savings_display": "$12.00/month"},
-                {"service": "ElasticIP", "resource_id": "eipalloc-unused", "issue_type": "Unassociated Elastic IP", "severity": "low", "confidence": "low", "estimated_monthly_savings": 10.0, "estimated_monthly_savings_display": "$10.00/month"},
+                {"category": "confirmed_issue", "category_label": "Confirmed issue", "service": "EC2", "resource_id": "i-idle", "issue_type": "Low EC2 CPU", "severity": "medium", "confidence": "medium", "estimated_monthly_savings": 20.0, "estimated_monthly_savings_display": "$20.00/month"},
+                {"category": "confirmed_issue", "category_label": "Confirmed issue", "service": "EBS", "resource_id": "vol-unattached", "issue_type": "Unattached EBS", "severity": "high", "confidence": "high", "estimated_monthly_savings": 12.0, "estimated_monthly_savings_display": "$12.00/month"},
+                {"category": "confirmed_issue", "category_label": "Confirmed issue", "service": "ElasticIP", "resource_id": "eipalloc-unused", "issue_type": "Unassociated Elastic IP", "severity": "low", "confidence": "low", "estimated_monthly_savings": 10.0, "estimated_monthly_savings_display": "$10.00/month"},
             ],
             "warnings": [],
             "billing": {},

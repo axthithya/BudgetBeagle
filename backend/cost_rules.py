@@ -6,6 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from pricing import Ec2PriceResolver, PricingQuote
+from report_schema import build_service_coverage, canonical_finding_category, category_label, coverage_summary, finding_summary, normalize_billing_context
 from sanitize import build_structured_warning
 
 
@@ -25,7 +26,7 @@ def build_cost_report(
     resolver = pricing_resolver or Ec2PriceResolver()
     region = str(scan_result.get("region") or "")
     resources = scan_result.get("resources", [])
-    billing = scan_result.get("billing") if isinstance(scan_result.get("billing"), dict) else {}
+    billing = normalize_billing_context(scan_result.get("billing") if isinstance(scan_result.get("billing"), dict) else {})
     findings: list[dict[str, Any]] = []
     warnings = _scan_warnings(scan_result)
 
@@ -50,10 +51,10 @@ def build_cost_report(
 
     total = _total_savings(findings)
     max_avoidable = _total_maximum_avoidable_cost(findings)
-    confirmed_issues = sum(1 for item in findings if item.get("category") == "Confirmed issue")
-    recommendations = sum(1 for item in findings if item.get("category") == "Recommendation")
-    observations = sum(1 for item in findings if item.get("category") == "Observation")
-    confidence = _overall_confidence(findings, warnings, billing, resources)
+    counts = finding_summary(findings)
+    service_coverage = build_service_coverage(resources, warnings, scan_result.get("errors", []), scan_result.get("service_coverage"))
+    service_summary = coverage_summary(service_coverage)
+    confidence = _overall_confidence(warnings, billing, service_coverage)
     savings_confidence = _aggregate_savings_confidence(total["amount_usd"])
     yearly_savings = _annualized(total["amount_usd"])
     monthly_account_average = _period_average(billing.get("account_total_ytd_usd"), billing)
@@ -62,7 +63,7 @@ def build_cost_report(
 
     return {
         "status": status,
-        "summary": _summary(len(resources), confirmed_issues, recommendations, len(warnings), total, max_avoidable),
+        "summary": _summary(len(resources), counts, len(warnings), total, max_avoidable),
         "findings": findings,
         "warnings": warnings,
         "billing": billing,
@@ -74,6 +75,8 @@ def build_cost_report(
         "yearly_savings": yearly_savings,
         "scan_confidence": confidence,
         "savings_confidence": savings_confidence,
+        "service_coverage": service_coverage,
+        "service_coverage_summary": service_summary,
         "metrics": {
             "account_total_ytd_usd": billing.get("account_total_ytd_usd"),
             "account_total_ytd_display": format_money(billing.get("account_total_ytd_usd")),
@@ -87,13 +90,18 @@ def build_cost_report(
             "yearly_savings_display": yearly_savings["display"],
             "confidence_score": confidence["score"],
             "confidence_label": confidence["label"],
-            "unutilized_count": confirmed_issues + recommendations,
+            "unutilized_count": counts["actionable_findings"],
+            "services_scanned": service_summary["services_scanned"],
+            "total_supported_services": service_summary["total_supported_services"],
+            "services_containing_resources": service_summary["services_containing_resources"],
+            "resources_discovered": service_summary["resources_discovered"],
         },
         "resources_scanned": len(resources),
-        "issues_found": confirmed_issues,
-        "confirmed_issues": confirmed_issues,
-        "recommendations": recommendations,
-        "observations": observations,
+        "issues_found": counts["confirmed_issues"],
+        "confirmed_issues": counts["confirmed_issues"],
+        "recommendations": counts["recommendations"],
+        "observations": counts["observations"],
+        "actionable_findings": counts["actionable_findings"],
         "warnings_count": len(warnings),
     }
 
@@ -485,9 +493,11 @@ def _finding(
     command: dict[str, Any] | None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    canonical_category = canonical_finding_category(category)
     payload = {
         "id": f"{service.lower()}:{resource_id}:{issue_type.lower().replace(' ', '-')}",
-        "category": category,
+        "category": canonical_category,
+        "category_label": category_label(canonical_category),
         "service": service,
         "resource_id": resource_id,
         "issue_type": issue_type,
@@ -571,6 +581,8 @@ def _total_savings(findings: list[dict[str, Any]]) -> dict[str, Any]:
     if not values:
         return {"amount_usd": None, "display": "Not enough data", "basis": "No evidence-backed numeric savings were available."}
     total = round(sum(values), 2)
+    if abs(total) < 0.005:
+        total = 0.0
     return {
         "amount_usd": total,
         "display": format_monthly_savings(total),
@@ -587,6 +599,8 @@ def _total_maximum_avoidable_cost(findings: list[dict[str, Any]]) -> dict[str, A
     if not values:
         return {"amount_usd": None, "display": "Not enough data", "basis": "No verified maximum avoidable cost was available."}
     total = round(sum(values), 2)
+    if abs(total) < 0.005:
+        total = 0.0
     return {
         "amount_usd": total,
         "display": format_monthly_savings(total),
@@ -598,6 +612,8 @@ def _annualized(monthly_amount: Any) -> dict[str, Any]:
     if monthly is None:
         return {"amount_usd": None, "display": "Not enough data", "basis": "Monthly savings are not numeric."}
     amount = round(monthly * 12, 2)
+    if abs(amount) < 0.005:
+        amount = 0.0
     return {"amount_usd": amount, "display": f"${amount:.2f}/year", "basis": "12 x evidence-backed monthly savings."}
 
 
@@ -612,29 +628,33 @@ def _period_average(amount: Any, billing: dict[str, Any]) -> float | None:
     return float(average.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
-def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str, Any]], billing: dict[str, Any], resources: list[dict[str, Any]]) -> dict[str, Any]:
+def _overall_confidence(warnings: list[dict[str, Any]], billing: dict[str, Any], service_coverage: list[dict[str, Any]]) -> dict[str, Any]:
     factors: list[dict[str, str]] = []
-    supported_services = {"EC2", "EBS", "S3", "RDS", "ELB", "CLASSICELB", "NATGATEWAY", "ELASTICIP"}
-    services_scanned = {str(resource.get("service") or "").upper() for resource in resources}
-    valid_services = services_scanned.intersection(supported_services)
+    summary = coverage_summary(service_coverage)
+    total_services = int(summary["total_supported_services"] or 0) or 1
+    services_scanned = int(summary["services_scanned"] or 0)
+    failed_services = int(summary["failed_services"] or 0)
+    skipped_services = int(summary["skipped_services"] or 0)
+    coverage_ratio = services_scanned / total_services
+    score = 50 + round(45 * coverage_ratio)
+
+    factors.append({
+        "name": "Service scan coverage",
+        "effect": "positive" if services_scanned == total_services else "negative",
+        "reason": f"{services_scanned}/{total_services} supported services completed; {summary['services_containing_resources']}/{total_services} contained resources.",
+    })
+
+    if failed_services or skipped_services:
+        score -= min((failed_services + skipped_services) * 10, 30)
+        factors.append({
+            "name": "Partial service failures",
+            "effect": "negative",
+            "reason": f"{failed_services} service(s) failed and {skipped_services} service(s) were skipped.",
+        })
+
     warning_count = len(warnings)
-    warning_penalty = min(warning_count * 7, 35)
-    score = 95 if valid_services else 80
-
-    if valid_services:
-        factors.append({
-            "name": "Service scan coverage",
-            "effect": "positive",
-            "reason": f"Scanned supported services: {', '.join(sorted(valid_services))}.",
-        })
-    else:
-        factors.append({
-            "name": "Service scan coverage",
-            "effect": "neutral",
-            "reason": "No supported resources were returned for this scan.",
-        })
-
     if warning_count:
+        warning_penalty = min(warning_count * 7, 35)
         score -= warning_penalty
         factors.append({
             "name": "Scan warnings",
@@ -650,8 +670,6 @@ def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str,
             "reason": "Billing data was unavailable, but resource scan confidence is kept separate from savings confidence.",
         })
     elif billing.get("status") == "available":
-        if not valid_services:
-            score += 10
         factors.append({
             "name": "Cost Explorer",
             "effect": "positive",
@@ -664,7 +682,7 @@ def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str,
         "score": score,
         "label": label,
         "level": label.lower(),
-        "basis": "Scan confidence represents scan completeness, service coverage, warnings, and optional data availability only.",
+        "basis": "Scan confidence represents scan completeness, service coverage, warnings, metric retrieval coverage, and billing availability only.",
         "factors": factors,
     }
 
@@ -733,27 +751,21 @@ def _confidence_score(value: str) -> int:
 
 def _summary(
     resources: int,
-    confirmed_issues: int,
-    recommendations: int,
+    counts: dict[str, int],
     warnings: int,
     total: dict[str, Any],
     max_avoidable: dict[str, Any],
 ) -> str:
     warning_text = " Scan completed with warnings." if warnings else ""
-    if total.get("amount_usd") is not None:
-        return (
-            f"Scanned {resources} resources. Found {confirmed_issues} confirmed issues and "
-            f"{recommendations} recommendations. Potential monthly savings: {total['display']}.{warning_text}"
-        )
-    if max_avoidable.get("amount_usd") is not None:
-        return (
-            f"Scanned {resources} resources. Found {confirmed_issues} confirmed issues and "
-            f"{recommendations} recommendations. Potential maximum avoidable cost: {max_avoidable['display']}.{warning_text}"
-        )
-    return (
-        f"Scanned {resources} resources. Found {confirmed_issues} confirmed issues and "
-        f"{recommendations} recommendations. Potential monthly savings: Not enough data.{warning_text}"
+    base = (
+        f"Scanned {resources} resources. Found {counts['confirmed_issues']} confirmed issues, "
+        f"{counts['recommendations']} recommendations, and {counts['observations']} observations."
     )
+    if total.get("amount_usd") is not None:
+        return f"{base} Potential monthly savings: {total['display']}.{warning_text}"
+    if max_avoidable.get("amount_usd") is not None:
+        return f"{base} Potential maximum avoidable cost: {max_avoidable['display']}.{warning_text}"
+    return f"{base} Potential monthly savings: Not enough data.{warning_text}"
 
 
 def _quote_ec2(pricing_resolver: Any, region: str, instance_type: str) -> PricingQuote:
@@ -788,7 +800,7 @@ def _lifecycle_status(metrics: dict[str, Any]) -> str:
         return str(status.get("status") or "unknown").lower()
     if isinstance(status, str):
         return status.lower()
-    # No fallback to ambiguous booleans – treat as unknown
+    # No fallback to ambiguous booleans â€“ treat as unknown
     return "unknown"
 
 

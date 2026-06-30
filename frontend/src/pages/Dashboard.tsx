@@ -66,6 +66,7 @@ export default function Dashboard() {
   const pollingTimerRef = useRef<number | null>(null);
   const activeAnalysisIdRef = useRef<number | null>(null);
   const navigatedAnalysisIdsRef = useRef<Set<number>>(new Set());
+  const initialLoadStartedRef = useRef(false);
   const [regions, setRegions] = useState<string[]>([]);
   const [groups, setGroups] = useState<GroupsResponse["resource_groups"]>([]);
   const [region, setRegion] = useState("");
@@ -80,12 +81,15 @@ export default function Dashboard() {
   const [currentAnalysisId, setCurrentAnalysisId] = useState<number | null>(null);
 
   useEffect(() => {
-    loadRegions();
-    loadAwsStatus();
-    const storedAnalysisId = getStoredActiveAnalysisId();
-    if (storedAnalysisId) {
-      setMessages(["Recovering active analysis..."]);
-      startPolling(storedAnalysisId);
+    if (!initialLoadStartedRef.current) {
+      initialLoadStartedRef.current = true;
+      loadRegions();
+      loadAwsStatus();
+      const storedAnalysisId = getStoredActiveAnalysisId();
+      if (storedAnalysisId) {
+        setMessages(["Recovering active analysis..."]);
+        startPolling(storedAnalysisId);
+      }
     }
     return () => {
       stopPolling();

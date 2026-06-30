@@ -57,7 +57,7 @@ export default function History() {
                 </p>
               </div>
               <Pill value={record.status} />
-              <span className="text-sm text-slate-300">{record.issues_found} issues</span>
+              <span className="text-sm text-slate-300">{record.confirmed_issues ?? record.issues_found} confirmed issues</span>
               <span className="text-sm text-cloud-green">{formatMonthlySavings(record.estimated_savings)}</span>
               <ChevronRight className="hidden h-5 w-5 text-slate-500 md:block" aria-hidden="true" />
             </button>

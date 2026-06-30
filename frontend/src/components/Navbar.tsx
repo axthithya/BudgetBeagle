@@ -1,12 +1,15 @@
 import { History, LayoutDashboard, LogOut } from "lucide-react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { clearAuth, getUserEmail } from "../lib/api";
+import { cancelPendingRequests, clearAuth, getUserEmail } from "../lib/api";
+import { clearStoredActiveAnalysisId } from "../lib/analysisStatus";
 
 export function Navbar() {
   const navigate = useNavigate();
   const email = getUserEmail();
 
   function logout() {
+    cancelPendingRequests();
+    clearStoredActiveAnalysisId();
     clearAuth();
     navigate("/login", { replace: true });
   }

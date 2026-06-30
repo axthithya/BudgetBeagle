@@ -217,7 +217,7 @@ def test_zip_export_endpoint_contains_exact_safe_utf8_files(monkeypatch: pytest.
             "estimated_monthly_savings": 0.0,
             "estimated_monthly_savings_display": "$0.00/month",
             "findings": [{
-                "category": "Confirmed issue",
+                "category": "confirmed_issue", "category_label": "Confirmed issue",
                 "service": "EBS",
                 "resource_id": "vol-0def456",
                 "issue_type": "Unattached EBS volume",
@@ -278,3 +278,59 @@ def test_zip_export_endpoint_contains_exact_safe_utf8_files(monkeypatch: pytest.
     assert "us-east-1" in decoded["billing-regions.csv"]
     assert "s3:GetLifecycleConfiguration" in decoded["warnings.csv"]
     assert "EBS" in decoded["service-coverage.csv"]
+
+
+def test_export_payload_normalizes_negative_zero_and_canonical_summary() -> None:
+    from export import build_export_payload
+
+    payload = build_export_payload({
+        "id": 99,
+        "status": "completed",
+        "region": "ap-southeast-1",
+        "scan_target": "whole-region",
+        "analysis_result": {
+            "report": {
+                "summary": "Manual fixture",
+                "resources_scanned": 3,
+                "issues_found": 0,
+                "confirmed_issues": 0,
+                "recommendations": 1,
+                "observations": 1,
+                "actionable_findings": 1,
+                "estimated_monthly_savings": None,
+                "estimated_monthly_savings_display": "Not enough data",
+            },
+            "scan": {"region": "ap-southeast-1", "errors": []},
+            "resources": [{"service": "EC2", "id": "i-1"}, {"service": "EBS", "id": "vol-1"}, {"service": "S3", "id": "bucket-1"}],
+            "findings": [
+                {"category": "recommendation", "service": "S3", "resource_id": "bucket-1", "issue_type": "S3 lifecycle policy review", "severity": "low", "confidence": "low", "estimated_monthly_savings": None, "estimated_monthly_savings_display": "Not enough data", "evidence": {"Lifecycle status": "Absent"}, "recommendation": "Review lifecycle policy.", "savings_basis": "Not enough data.", "action_risk": "No command generated."},
+                {"category": "observation", "service": "EC2", "resource_id": "i-1", "issue_type": "Low EC2 CPU utilization review candidate", "severity": "low", "confidence": "low", "estimated_monthly_savings": None, "estimated_monthly_savings_display": "Not enough data", "evidence": {}, "recommendation": "Monitor.", "savings_basis": "Not enough data.", "action_risk": "No command generated."},
+            ],
+            "warnings": [],
+            "billing": {
+                "status": "available",
+                "monthly_account_costs": [{"label": "May 2026", "amount_usd": -0.001, "display": "$-0.00"}],
+                "service_costs_ytd": [{"name": "Amazon Elastic Compute Cloud", "amount_usd": -0.001, "display": "$-0.00"}],
+                "region_costs_ytd": [{"name": "NoRegion", "amount_usd": -0.001, "display": "$-0.00"}],
+            },
+            "scan_confidence": {"score": 95, "label": "High", "level": "high"},
+            "service_coverage": [
+                {"service": "EC2", "status": "completed", "count": 1},
+                {"service": "EBS", "status": "completed", "count": 1},
+                {"service": "S3", "status": "completed", "count": 1},
+                {"service": "RDS", "status": "no_resources", "count": 0},
+                {"service": "Load Balancing", "status": "no_resources", "count": 0},
+                {"service": "Elastic IP", "status": "no_resources", "count": 0},
+                {"service": "NAT Gateway", "status": "no_resources", "count": 0},
+            ],
+        },
+    })
+    serialized = json.dumps(payload)
+    assert payload["report"]["confirmed_issues"] == 0
+    assert payload["report"]["recommendations"] == 1
+    assert payload["report"]["observations"] == 1
+    assert payload["report"]["actionable_findings"] == 1
+    assert payload["report"]["service_coverage_summary"]["services_scanned_display"] == "7/7"
+    assert "$-0.00" not in serialized
+    assert "-$0.00" not in serialized
+    assert "-0.00 USD" not in serialized

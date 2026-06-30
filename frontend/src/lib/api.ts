@@ -22,7 +22,7 @@ export type BillingAmount = {
   label?: string;
   start?: string;
   end?: string;
-  amount_usd: number;
+  amount_usd: number | string;
   display: string;
 };
 
@@ -65,6 +65,17 @@ export type ReportConfidence = {
   factors?: ConfidenceFactor[];
 };
 
+export type ServiceCoverageSummary = {
+  total_supported_services?: number;
+  services_scanned?: number;
+  services_containing_resources?: number;
+  resources_discovered?: number;
+  failed_services?: number;
+  skipped_services?: number;
+  services_scanned_display?: string;
+  services_containing_resources_display?: string;
+};
+
 export type ReportMetrics = {
   account_total_ytd_usd?: number | null;
   account_total_ytd_display?: string;
@@ -79,6 +90,10 @@ export type ReportMetrics = {
   confidence_score?: number;
   confidence_label?: string;
   unutilized_count?: number;
+  services_scanned?: number;
+  total_supported_services?: number;
+  services_containing_resources?: number;
+  resources_discovered?: number;
 };
 
 export type AwsCommand = {
@@ -91,7 +106,8 @@ export type AwsCommand = {
 
 export type Issue = {
   id?: string;
-  category?: "Confirmed issue" | "Recommendation" | "Observation" | string;
+  category?: "confirmed_issue" | "recommendation" | "observation" | "Confirmed issue" | "Recommendation" | "Observation" | string;
+  category_label?: string;
   service?: string;
   resource_id: string;
   issue_type: string;
@@ -134,6 +150,11 @@ export type AnalysisRecord = {
   scan_target: string;
   resources_scanned: number;
   issues_found: number;
+  confirmed_issues?: number;
+  recommendations?: number;
+  observations?: number;
+  actionable_findings?: number;
+  service_coverage_summary?: ServiceCoverageSummary;
   estimated_savings: string;
   analysis_result: AnalysisResult | { error?: string; reason?: string } | Record<string, never>;
   status: AnalysisStatus;
@@ -149,11 +170,13 @@ export type AnalysisReportSummary = {
   potential_monthly_savings?: { amount_usd?: number | null; display?: string; basis?: string };
   potential_maximum_avoidable_cost?: { amount_usd?: number | null; display?: string; basis?: string };
   savings_confidence?: ReportConfidence;
+  service_coverage_summary?: ServiceCoverageSummary;
   resources_scanned: number;
   issues_found: number;
   confirmed_issues?: number;
   recommendations?: number;
   observations?: number;
+  actionable_findings?: number;
   warnings_count?: number;
   notes?: string[];
 };
@@ -163,6 +186,8 @@ export type ServiceCoverage = {
   status: "completed" | "completed_with_warnings" | "no_resources" | "skipped" | "failed" | string;
   count: number;
   label?: string;
+  scanned?: boolean;
+  has_resources?: boolean;
 };
 
 export type AnalysisResult = {
@@ -202,6 +227,48 @@ export type AwsStatus = {
   optional_permissions: { available: string[]; missing: string[] };
 };
 
+type ApiFetchOptions = RequestInit & { authRequired?: boolean };
+type AuthListener = () => void;
+
+export const AUTH_EXPIRED_EVENT = "budgetbeagle:auth-expired";
+
+let authInitialized = false;
+let unauthorizedHandled = false;
+let resolveAuthReady: (() => void) | null = null;
+let authReadyPromise = new Promise<void>((resolve) => {
+  resolveAuthReady = resolve;
+});
+const authListeners = new Set<AuthListener>();
+const pendingControllers = new Set<AbortController>();
+const PUBLIC_PATHS = new Set(["/api/auth/login", "/api/auth/signup", "/api/health"]);
+
+export class AuthRequiredError extends Error {
+  constructor(message = "Authentication is required.") {
+    super(message);
+    this.name = "AuthRequiredError";
+  }
+}
+
+export function initializeAuth() {
+  if (authInitialized) return;
+  authInitialized = true;
+  resolveAuthReady?.();
+  notifyAuthListeners();
+}
+
+export function isAuthInitialized() {
+  return authInitialized;
+}
+
+export function subscribeAuthState(listener: AuthListener) {
+  authListeners.add(listener);
+  return () => authListeners.delete(listener);
+}
+
+function notifyAuthListeners() {
+  for (const listener of authListeners) listener();
+}
+
 export function getToken() {
   return localStorage.getItem("token") ?? "";
 }
@@ -217,60 +284,125 @@ export function getUserEmail() {
 export function setAuth(auth: AuthResponse) {
   localStorage.setItem("token", auth.token);
   localStorage.setItem("user", JSON.stringify(auth.user));
+  unauthorizedHandled = false;
+  initializeAuth();
+  notifyAuthListeners();
 }
 
 export function clearAuth() {
   localStorage.removeItem("token");
   localStorage.removeItem("user");
+  notifyAuthListeners();
 }
 
-export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-  const token = getToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
+export function cancelPendingRequests() {
+  for (const controller of Array.from(pendingControllers)) controller.abort();
+  pendingControllers.clear();
+}
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers,
-  });
-
-  if (!response.ok) {
-    let message = `Request failed with ${response.status}`;
-    try {
-      const body = await response.json();
-      message = body.detail ?? message;
-    } catch {
-      // Keep the generic status message.
-    }
-    throw new Error(message);
-  }
-
+export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
+  const response = await request(path, options, true);
   return response.json() as Promise<T>;
 }
 
-export async function apiFetchBlob(path: string, options: RequestInit = {}): Promise<Blob> {
+export async function apiFetchBlob(path: string, options: ApiFetchOptions = {}): Promise<Blob> {
+  const response = await request(path, options, false);
+  return response.blob();
+}
+
+async function request(path: string, options: ApiFetchOptions, jsonRequest: boolean): Promise<Response> {
+  const authRequired = options.authRequired ?? !PUBLIC_PATHS.has(path);
+  if (authRequired) await waitForAuthInitialization(options.signal);
+
   const headers = new Headers(options.headers);
+  if (jsonRequest && !headers.has("Content-Type") && options.body && !(options.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json");
+  }
+
   const token = getToken();
-  if (token) {
+  if (authRequired) {
+    if (!token) throw new AuthRequiredError();
+    headers.set("Authorization", `Bearer ${token}`);
+  } else if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers,
-  });
+  const controller = new AbortController();
+  pendingControllers.add(controller);
+  const signal = mergeSignals(controller, options.signal);
+  const { authRequired: _authRequired, signal: _signal, ...fetchOptions } = options;
 
-  if (!response.ok) {
-    throw new Error(`Request failed with ${response.status}`);
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...fetchOptions,
+      headers,
+      signal,
+    });
+
+    if (response.status === 401 && authRequired) {
+      handleUnauthorized();
+    }
+
+    if (!response.ok) {
+      let message = `Request failed with ${response.status}`;
+      try {
+        const body = await response.json();
+        message = body.detail ?? message;
+      } catch {
+        // Keep the generic status message.
+      }
+      throw new Error(message);
+    }
+
+    return response;
+  } finally {
+    pendingControllers.delete(controller);
   }
-  return response.blob();
+}
+
+function mergeSignals(controller: AbortController, external?: AbortSignal | null): AbortSignal {
+  if (!external) return controller.signal;
+  if (external.aborted) controller.abort();
+  else external.addEventListener("abort", () => controller.abort(), { once: true });
+  return controller.signal;
+}
+
+async function waitForAuthInitialization(signal?: AbortSignal | null) {
+  if (authInitialized) return;
+  await Promise.race([
+    authReadyPromise,
+    new Promise<void>((_, reject) => {
+      if (!signal) return;
+      if (signal.aborted) reject(new DOMException("Aborted", "AbortError"));
+      signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    }),
+  ]);
+}
+
+function handleUnauthorized() {
+  if (unauthorizedHandled) return;
+  unauthorizedHandled = true;
+  clearAuth();
+  window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
 }
 
 export function websocketUrl(path: string) {
   const url = new URL(API_BASE_URL);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return `${url.origin}${path}`;
+}
+
+export function resetAuthForTests(initialized = false) {
+  authInitialized = initialized;
+  unauthorizedHandled = false;
+  if (initialized) {
+    authReadyPromise = Promise.resolve();
+    resolveAuthReady = null;
+  } else {
+    authReadyPromise = new Promise<void>((resolve) => {
+      resolveAuthReady = resolve;
+    });
+  }
+  pendingControllers.clear();
+  authListeners.clear();
 }

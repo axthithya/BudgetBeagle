@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi.responses import StreamingResponse
 
-from report_schema import normalize_analysis_result
+from report_schema import coverage_summary, format_money, normalize_analysis_result, normalize_money_string
 from sanitize import sanitize_report, scrub_sensitive_text
 
 ZIP_FILENAMES = [
@@ -66,18 +66,25 @@ def _summary_csv(payload: dict[str, Any]) -> str:
     report = payload.get("report", {})
     metrics = payload.get("metrics", {})
     confidence = payload.get("scan_confidence", {})
+    service_summary = report.get("service_coverage_summary") or coverage_summary(payload.get("service_coverage", []))
+    savings_confidence = report.get("savings_confidence") or {}
     rows = [
         ["Metric", "Value"],
         ["Status", payload.get("status", "Unknown")],
         ["Resources Scanned", report.get("resources_scanned", "Unknown")],
+        ["Resources Discovered", service_summary.get("resources_discovered", "Unknown")],
+        ["Services Scanned", service_summary.get("services_scanned_display", "Unknown")],
+        ["Services Containing Resources", service_summary.get("services_containing_resources_display", "Unknown")],
         ["Confirmed Issues", report.get("confirmed_issues", "Unknown")],
         ["Recommendations", report.get("recommendations", "Unknown")],
         ["Observations", report.get("observations", "Unknown")],
+        ["Actionable Findings", report.get("actionable_findings", "Unknown")],
         ["Warnings", report.get("warnings_count", "Unknown")],
         ["Monthly Savings", report.get("estimated_monthly_savings_display") or metrics.get("monthly_savings_display") or "Not enough data"],
         ["Yearly Savings", (report.get("yearly_savings") or {}).get("display") or metrics.get("yearly_savings_display") or "Not enough data"],
         ["Scan Confidence", confidence.get("label", "Unknown")],
         ["Scan Confidence Score", confidence.get("score", "Unknown")],
+        ["Savings Confidence", savings_confidence.get("label", "Not applicable")],
     ]
     return _csv(rows)
 
@@ -139,7 +146,9 @@ def _findings_csv(payload: dict[str, Any]) -> str:
 def _billing_csv(payload: dict[str, Any], key: str, header: list[str]) -> str:
     rows = [header]
     for item in (payload.get("billing", {}) or {}).get(key, []):
-        rows.append([item.get("name") or item.get("label") or "Unknown", item.get("amount_usd", "Unknown"), item.get("display", "Unknown")])
+        amount = item.get("amount_usd", "Unknown")
+        display = format_money(amount) if isinstance(amount, (int, float)) else normalize_money_string(item.get("display", "Unknown"))
+        rows.append([item.get("name") or item.get("label") or "Unknown", amount, display])
     return _csv(rows)
 
 
@@ -158,9 +167,16 @@ def _warnings_csv(payload: dict[str, Any]) -> str:
 
 
 def _coverage_csv(payload: dict[str, Any]) -> str:
-    rows = [["Service", "Status", "Count"]]
+    rows = [["Service", "Status", "Count", "Scanned", "Has Resources", "Label"]]
     for item in payload.get("service_coverage", []):
-        rows.append([item.get("service", "Unknown"), item.get("status", "Unknown"), item.get("count", 0)])
+        rows.append([
+            item.get("service", "Unknown"),
+            item.get("status", "Unknown"),
+            item.get("count", 0),
+            item.get("scanned", item.get("status") in {"completed", "completed_with_warnings", "no_resources"}),
+            item.get("has_resources", int(item.get("count") or 0) > 0),
+            item.get("label", "Unknown"),
+        ])
     return _csv(rows)
 
 
@@ -179,4 +195,4 @@ def _json_cell(value: Any) -> str:
 def _safe_cell(value: Any) -> str:
     if value is None:
         return "Unknown"
-    return scrub_sensitive_text(str(value))
+    return scrub_sensitive_text(normalize_money_string(str(value)))

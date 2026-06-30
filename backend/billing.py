@@ -134,7 +134,15 @@ def _grouped_ytd(client: Any, start: date, end: date, dimension: str) -> list[di
             amount = _amount(group.get("Metrics", {}).get("UnblendedCost", {}))
             totals[key] = round(totals.get(key, 0.0) + amount, 2)
     result = []
-    for key, amount in sorted(totals.items(), key=lambda item: item[1], reverse=True):
+
+    def sort_key(item: tuple[str, float]) -> tuple[bool, float, str]:
+        key, amount = item
+        normalized = _normalize_amount(amount)
+        is_zero = abs(normalized) < 0.005
+        return (is_zero, -normalized if not is_zero else 0.0, key.lower())
+
+    for key, amount in sorted(totals.items(), key=sort_key):
+        amount = _normalize_amount(amount)
         if key == "NoRegion":
             key = "Global / No Region"
         result.append({"name": key, "amount_usd": amount, "display": _money(amount)})
@@ -180,15 +188,23 @@ def _region_dimension_candidates(region: str) -> list[str]:
 
 def _amount(metric: dict[str, Any]) -> float:
     try:
-        return round(float(metric.get("Amount") or 0), 2)
+        return _normalize_amount(float(metric.get("Amount") or 0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _normalize_amount(value: float) -> float:
+    amount = round(float(value), 2)
+    if abs(amount) < 0.005:
+        return 0.0
+    return amount
 
 
 def _money(value: float | None) -> str:
     if value is None:
         return "Not enough data"
-    return f"${value:.2f}"
+    amount = _normalize_amount(value)
+    return f"${amount:.2f}"
 
 
 def _month_label(value: str | None) -> str:

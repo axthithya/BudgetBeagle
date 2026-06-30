@@ -399,7 +399,7 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
             analysis_id,
             result,
             resources_scanned=int(result.get("report", {}).get("resources_scanned") or len(result.get("resources", []))),
-            issues_found=int(result.get("report", {}).get("confirmed_issues") or result.get("report", {}).get("issues_found") or 0),
+            issues_found=int(result.get("report", {}).get("confirmed_issues") or 0),
             estimated_savings=str(savings_display),
             status=final_status,
         )
@@ -432,5 +432,13 @@ def _safe_serialize(analysis: Analysis) -> dict[str, Any]:
             data["analysis_result"] = sanitize_report(
                 normalize_analysis_result(result, region=data.get("region"), resource_group=data.get("scan_target"))
             )
+    normalized = data.get("analysis_result") if isinstance(data.get("analysis_result"), dict) else {}
+    report = normalized.get("report", {}) if isinstance(normalized.get("report"), dict) else {}
+    data["issues_found"] = int(report.get("confirmed_issues") or data.get("issues_found") or 0)
+    data["confirmed_issues"] = int(report.get("confirmed_issues") or 0)
+    data["recommendations"] = int(report.get("recommendations") or 0)
+    data["observations"] = int(report.get("observations") or 0)
+    data["actionable_findings"] = int(report.get("actionable_findings") or data["confirmed_issues"] + data["recommendations"])
+    data["service_coverage_summary"] = report.get("service_coverage_summary", {})
     data["schema_version"] = "2.0"
     return data
