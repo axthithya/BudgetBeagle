@@ -41,7 +41,7 @@ const tabs: { key: TabKey; label: string; icon: typeof BarChart3 }[] = [
   { key: "warnings", label: "Warnings", icon: AlertTriangle },
 ];
 
-// â”€â”€ Schema version â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Schema version -----------------------------------------------------
 const SCHEMA_VERSION = "2.0";
 
 export default function Report() {
@@ -187,7 +187,7 @@ export default function Report() {
   const observations = report.observations ?? 0;
   const actionableCount = report.actionable_findings ?? confirmedIssues + recommendations;
 
-  // Pricing coverage â€” only count actionable findings
+  // Pricing coverage - only count actionable findings
   const actionableFindings = findings.filter((f) => canonicalCategory(f.category) !== "observation");
   const pricedCount = actionableFindings.filter((f) => f.pricing_status === "verified" || f.pricing_source).length;
   const pricingLabel = actionableFindings.length === 0 ? "Not applicable" : `${pricedCount}/${actionableFindings.length} priced`;
@@ -195,7 +195,7 @@ export default function Report() {
     ? "No actionable findings require pricing data."
     : "Verified price sources only contribute numeric savings.";
 
-  // Â§11: Service scan coverage
+  // Phase 1.11: Service scan coverage
   const coverage = normalizeCoverage(result.service_coverage, resources, warnings);
   const coverageStats = getCoverageSummary(coverage, resources.length, report.service_coverage_summary);
   const findingConfidence = summarizeFindingConfidence(findings);
@@ -208,7 +208,7 @@ export default function Report() {
           <div className="min-w-0">
             <h1 className="text-2xl font-semibold tracking-normal text-white sm:text-3xl">BudgetBeagle Report</h1>
             <p className="mt-2 max-w-5xl break-words text-sm leading-6 text-slate-400">
-              Region: {regionLabel} Â· Account {billing.account_id ?? result.scan.account_id ?? "Unknown"} Â· {period} Â· Scanned {scanDate}
+              Region: {regionLabel}  -  Account {billing.account_id ?? result.scan.account_id ?? "Unknown"}  -  {period}  -  Scanned {scanDate}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -303,7 +303,7 @@ export default function Report() {
   );
 }
 
-// â”€â”€ Overview Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Overview Tab --------------------------------------------------------
 
 type OverviewProps = {
   result: AnalysisResult;
@@ -363,13 +363,13 @@ function OverviewTab({ result, billing, warnings, confidence, savingsConfidence,
         />
       </section>
 
-      {/* Â§11: Scan coverage details */}
+      {/* Phase 1.11: Scan coverage details */}
       <CoverageSection coverage={coverage} />
     </div>
   );
 }
 
-// â”€â”€ Billing Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Billing Tab --------------------------------------------------------
 
 function BillingTab({ billing, showZero, onShowZeroChange }: { billing: BillingContext; showZero: boolean; onShowZeroChange: (value: boolean) => void }) {
   const accountMonths = billing.monthly_account_costs ?? [];
@@ -439,7 +439,7 @@ function BillingTab({ billing, showZero, onShowZeroChange }: { billing: BillingC
   );
 }
 
-// Findings Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Findings Tab -------------------------------------------------------
 
 function FindingsTab({ findings, observations, copied, onCopy }: { findings: Issue[]; observations: number; copied: string | null; onCopy: (issue: Issue) => void }) {
   if (!findings.length) {
@@ -464,7 +464,7 @@ function FindingsTab({ findings, observations, copied, onCopy }: { findings: Iss
   );
 }
 
-// â”€â”€ Resources Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Resources Tab ------------------------------------------------------
 
 function ResourcesTab({ resources, copied, onCopy }: { resources: unknown[]; copied: string | null; onCopy: (text: string, id: string) => void }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -588,7 +588,7 @@ function ResourcesTab({ resources, copied, onCopy }: { resources: unknown[]; cop
   );
 }
 
-// â”€â”€ Commands Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Commands Tab -------------------------------------------------------
 
 function CommandsTab({ commands, copied, onCopy }: { commands: Issue[]; copied: string | null; onCopy: (issue: Issue) => void }) {
   if (!commands.length) {
@@ -617,7 +617,7 @@ function CommandsTab({ commands, copied, onCopy }: { commands: Issue[]; copied: 
   );
 }
 
-// â”€â”€ Warnings Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Warnings Tab -------------------------------------------------------
 
 function WarningsTab({ warnings, copied, onCopy }: { warnings: ScanWarning[]; copied: string | null; onCopy: (text: string, id: string) => void }) {
   if (!warnings.length) {
@@ -636,7 +636,7 @@ function WarningsTab({ warnings, copied, onCopy }: { warnings: ScanWarning[]; co
   );
 }
 
-// â”€â”€ Finding Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Finding Card -------------------------------------------------------
 
 function FindingCard({ issue, copied, onCopy }: { issue: Issue; copied: string | null; onCopy: (issue: Issue) => void }) {
   const savings = issue.estimated_monthly_savings_display ?? formatMonthlySavings(issue.estimated_monthly_savings);
@@ -683,7 +683,7 @@ function FindingCard({ issue, copied, onCopy }: { issue: Issue; copied: string |
   );
 }
 
-// â”€â”€ Warning Summary + Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Warning Summary + Card ---------------------------------------------
 
 function WarningSummary({ warnings }: { warnings: ScanWarning[] }) {
   const visible = warnings.slice(0, 3);
@@ -697,7 +697,7 @@ function WarningSummary({ warnings }: { warnings: ScanWarning[] }) {
         {visible.map((warning, index) => (
           <p key={`${warning.service}-${warning.resource_id ?? index}-${warning.code ?? index}`} className="text-sm">
             <span className="font-medium text-white">{warning.title ?? warning.service}</span>
-            {warning.resource_id ? ` â€” ${warning.resource_id}` : ""}
+            {warning.resource_id ? ` - ${warning.resource_id}` : ""}
           </p>
         ))}
         {warnings.length > visible.length && (
@@ -784,7 +784,7 @@ function WarningCard({ warning, copied, onCopy }: { warning: ScanWarning; copied
   );
 }
 
-// â”€â”€ Confidence Section â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Confidence Section -------------------------------------------------
 
 function ConfidenceSection({ scanConfidence, findingConfidence, savingsConfidence }: { scanConfidence?: ReportConfidence; findingConfidence: FindingConfidenceSummary; savingsConfidence?: ReportConfidence }) {
   const [open, setOpen] = useState(false);
@@ -827,7 +827,7 @@ function ConfidenceSection({ scanConfidence, findingConfidence, savingsConfidenc
   );
 }
 
-// Coverage Section â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Coverage Section ---------------------------------------------------
 
 type CoverageEntry = {
   service: string;
@@ -914,7 +914,7 @@ function CoverageSection({ coverage }: { coverage: CoverageEntry[] }) {
   );
 }
 
-// â”€â”€ Shared Components â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Shared Components --------------------------------------------------
 
 function Metric({ label, sublabel, value, tone = "slate" }: { label: string; sublabel: string; value: string; tone?: "slate" | "green" | "rose" }) {
   const color = tone === "green" ? "border-emerald-500/30 bg-emerald-500/10 text-cloud-green" : tone === "rose" ? "border-rose-500/30 bg-rose-500/10 text-rose-200" : "border-cloud-line bg-cloud-panel text-white";
@@ -1043,7 +1043,7 @@ function StatusBadge({ value }: { value: string }) {
   return <span className={`rounded-md border px-3 py-1 text-sm ${className}`}>{formatStatus(value)}</span>;
 }
 
-// â”€â”€ Normalization & Formatting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Normalization & Formatting -----------------------------------------
 
 type MetricRow = { label: string; value: string };
 
@@ -1156,9 +1156,9 @@ function normalizeResource(resource: unknown) {
     const size = metrics.size_gb;
     const attachCount = metrics.attachment_count ?? (metrics.unattached ? 0 : "?");
     const isGp3 = String(item.type_or_sku ?? "").toLowerCase() === "gp3";
-    const iopsLabel = isGp3 && (iops === 3000 || iops == null) ? "3,000 â€” included baseline" : iops != null ? String(iops) : "Unknown";
-    const tpLabel = isGp3 && (throughput === 125 || throughput == null) ? "125 MiB/s â€” included baseline" : throughput != null ? `${throughput} MiB/s` : "Unknown";
-    const assessment = metrics.unattached ? "Unattached â€” review for deletion" : "Normal configuration";
+    const iopsLabel = isGp3 && (iops === 3000 || iops == null) ? "3,000 - included baseline" : iops != null ? String(iops) : "Unknown";
+    const tpLabel = isGp3 && (throughput === 125 || throughput == null) ? "125 MiB/s - included baseline" : throughput != null ? `${throughput} MiB/s` : "Unknown";
+    const assessment = metrics.unattached ? "Unattached - review for deletion" : "Normal configuration";
     metricRows.push({ label: "Type", value: String(item.type_or_sku ?? "-") });
     metricRows.push({ label: "Size", value: size != null ? `${size} GiB` : "Unknown" });
     metricRows.push({ label: "State", value: String(item.state ?? "-") });
@@ -1203,7 +1203,7 @@ function normalizeResource(resource: unknown) {
     type: String(item.type_or_sku ?? "-"),
     state: String(item.state ?? "-"),
     metricRows,
-    metrics: metricRows.map((r) => `${r.label}: ${r.value}`).join(" Â· "),
+    metrics: metricRows.map((r) => `${r.label}: ${r.value}`).join("  -  "),
   };
 }
 

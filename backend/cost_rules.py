@@ -800,7 +800,7 @@ def _lifecycle_status(metrics: dict[str, Any]) -> str:
         return str(status.get("status") or "unknown").lower()
     if isinstance(status, str):
         return status.lower()
-    # No fallback to ambiguous booleans â€“ treat as unknown
+    # No fallback to ambiguous booleans - treat as unknown
     return "unknown"
 
 

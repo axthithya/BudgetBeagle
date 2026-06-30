@@ -123,7 +123,7 @@ export default function Dashboard() {
       const data = await apiFetch<AwsStatus>("/api/aws/status");
       setAwsStatus(data);
     } catch {
-      // Non-critical — don't block the UI
+      // Non-critical - don't block the UI
     }
   }
 
@@ -402,11 +402,11 @@ export default function Dashboard() {
               <div className="rounded-lg border border-amber-400/30 bg-amber-500/10 p-4 text-sm text-amber-100">
                 <p className="font-medium text-white">Important notes</p>
                 <ul className="mt-2 list-disc space-y-1 pl-5 text-amber-100/90">
-                  <li><code className="text-amber-200">s3:GetLifecycleConfiguration</code> — verifies whether S3 buckets have lifecycle policies</li>
-                  <li><code className="text-amber-200">ce:GetCostAndUsage</code> — retrieves Cost Explorer billing data (optional)</li>
+                  <li><code className="text-amber-200">s3:GetLifecycleConfiguration</code> - verifies whether S3 buckets have lifecycle policies</li>
+                  <li><code className="text-amber-200">ce:GetCostAndUsage</code> - retrieves Cost Explorer billing data (optional)</li>
                   <li>Missing optional permissions produce warnings, not failed scans</li>
                   <li>BudgetBeagle is read-only and never modifies AWS resources</li>
-                  <li>Attach this policy manually — BudgetBeagle does not modify IAM</li>
+                  <li>Attach this policy manually - BudgetBeagle does not modify IAM</li>
                 </ul>
               </div>
             </div>
@@ -454,8 +454,8 @@ function AwsConnectionPanel({ status, onViewPolicy }: { status: AwsStatus; onVie
             <p className="mt-0.5 text-sm text-slate-300">
               {isConnected && (
                 <>
-                  Account: {status.account_id_masked ?? "Unknown"} · Region: {status.default_region}
-                  {isLimited ? " · Permissions: Limited" : " · Permissions: Full"}
+                  Account: {status.account_id_masked ?? "Unknown"}  -  Region: {status.default_region}
+                  {isLimited ? "  -  Permissions: Limited" : "  -  Permissions: Full"}
                 </>
               )}
               {!isConnected && "Configure AWS credentials to start scanning."}

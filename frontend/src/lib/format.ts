@@ -15,7 +15,7 @@ export function formatUSD(value: unknown): string {
   return `$${(safe === 0 ? 0 : safe).toFixed(2)}`;
 }
 
-/** Format monthly savings — returns "$X.XX/month" or "Not enough data". */
+/** Format monthly savings - returns "$X.XX/month" or "Not enough data". */
 export function formatMonthlySavings(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) {
     const safe = Math.abs(value) < 0.005 ? 0 : value;
