@@ -133,10 +133,12 @@ def _grouped_ytd(client: Any, start: date, end: date, dimension: str) -> list[di
             key = str((group.get("Keys") or ["Unknown"])[0] or "Unknown")
             amount = _amount(group.get("Metrics", {}).get("UnblendedCost", {}))
             totals[key] = round(totals.get(key, 0.0) + amount, 2)
-    return [
-        {"name": key, "amount_usd": amount, "display": _money(amount)}
-        for key, amount in sorted(totals.items(), key=lambda item: item[1], reverse=True)
-    ]
+    result = []
+    for key, amount in sorted(totals.items(), key=lambda item: item[1], reverse=True):
+        if key == "NoRegion":
+            key = "Global / No Region"
+        result.append({"name": key, "amount_usd": amount, "display": _money(amount)})
+    return result
 
 
 def _billing_insights(

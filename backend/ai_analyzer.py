@@ -49,6 +49,7 @@ def analyze_costs(
     use_groq: bool = True,
 ) -> dict[str, Any]:
     report = build_cost_report(scan_result, pricing_resolver=pricing_resolver)
+    report["ai_enrichment_status"] = "none"
     if use_groq:
         _enhance_with_groq(report, scan_result)
     return report
@@ -83,7 +84,9 @@ def _enhance_with_groq(report: dict[str, Any], scan_result: dict[str, Any]) -> N
         content = response.choices[0].message.content or "{}"
         enhancement = _parse_enhancement(content)
         _apply_ai_enhancement(report, enhancement)
+        report["ai_enrichment_status"] = "completed"
     except Exception:
+        report["ai_enrichment_status"] = "failed"
         report.setdefault("notes", []).append("AI explanation was unavailable; deterministic findings were preserved.")
 
 
@@ -99,7 +102,8 @@ def _build_prompt(scan_result: dict[str, Any], report: dict[str, Any]) -> str:
                 "resource_id": item.get("resource_id"),
                 "issue_type": item.get("issue_type"),
                 "severity": item.get("severity"),
-                "confidence": item.get("confidence"),
+                "finding_confidence": item.get("finding_confidence"),
+                "savings_confidence": item.get("savings_confidence"),
                 "evidence": item.get("evidence"),
                 "pricing_status": item.get("pricing_status"),
                 "savings_basis": item.get("savings_basis"),
@@ -109,7 +113,7 @@ def _build_prompt(scan_result: dict[str, Any], report: dict[str, Any]) -> str:
         ],
         "warnings": report.get("warnings", []),
         "billing": report.get("billing"),
-        "confidence": report.get("confidence"),
+        "scan_confidence": report.get("scan_confidence"),
         "deterministic_summary": report.get("summary"),
     }
     return json.dumps(payload, indent=2, default=str)

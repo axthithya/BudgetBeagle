@@ -25,11 +25,11 @@ export default function History() {
   }, []);
 
   if (loading) {
-    return <div className="flex items-center gap-3 text-slate-300"><Loader2 className="h-4 w-4 animate-spin" /> Loading history</div>;
+    return <div className="flex items-center gap-3 text-slate-300" role="status" aria-live="polite"><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Loading history</div>;
   }
 
   if (error) {
-    return <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-4 text-rose-100">{error}</div>;
+    return <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-4 text-rose-100">{error}</div>;
   }
 
   return (
@@ -46,7 +46,8 @@ export default function History() {
               key={record.id}
               type="button"
               onClick={() => navigate(`/report/${record.id}`)}
-              className="grid w-full gap-3 px-5 py-4 text-left hover:bg-slate-800/60 md:grid-cols-[1fr_120px_120px_120px_28px] md:items-center"
+              className="grid w-full gap-3 px-5 py-4 text-left hover:bg-slate-800/60 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cloud-cyan md:grid-cols-[1fr_120px_120px_120px_28px] md:items-center"
+              aria-label={`Open analysis ${record.id} for ${record.region}`}
             >
               <div className="min-w-0">
                 <p className="truncate font-medium text-white">{record.region} / {record.scan_target}</p>

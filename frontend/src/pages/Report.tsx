@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import {
   AlertTriangle,
   BarChart3,
@@ -23,14 +23,13 @@ import {
   Terminal,
 } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
-import { AnalysisRecord, AnalysisResult, BillingAmount, BillingContext, Issue, ScanWarning, apiFetch } from "../lib/api";
-import { formatMonthlySavings, formatStatus, formatUSD, formatMoney, formatDateTime, formatShortDate, formatDuration, humanLabel, humanizeMetricName, formatBytes } from "../lib/format";
+import { AnalysisRecord, AnalysisResult, BillingAmount, BillingContext, Issue, ReportConfidence, ScanWarning, ServiceCoverage, apiFetch, apiFetchBlob } from "../lib/api";
+import { isTerminalAnalysisStatus } from "../lib/analysisStatus";
+import { formatMonthlySavings, formatStatus, formatMoney, formatDateTime, formatShortDate, formatDuration, humanLabel, humanizeMetricName, formatBytes } from "../lib/format";
 
 function isFullResult(value: AnalysisRecord["analysis_result"]): value is AnalysisResult {
-  return Boolean((value as AnalysisResult).analysis);
+  return Boolean((value as AnalysisResult).report);
 }
-
-const TERMINAL_STATUSES = new Set(["completed", "completed_with_warnings", "failed", "cancelled", "interrupted"]);
 type TabKey = "overview" | "billing" | "findings" | "resources" | "commands" | "warnings";
 
 const tabs: { key: TabKey; label: string; icon: typeof BarChart3 }[] = [
@@ -51,6 +50,25 @@ export default function Report() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
+  const tabRefs = useRef<Partial<Record<TabKey, HTMLButtonElement | null>>>({});
+
+  function selectTab(tab: TabKey) {
+    setActiveTab(tab);
+    window.requestAnimationFrame(() => tabRefs.current[tab]?.focus());
+  }
+
+  function handleTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, key: TabKey) {
+    const currentIndex = tabs.findIndex((tab) => tab.key === key);
+    const lastIndex = tabs.length - 1;
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowRight") nextIndex = currentIndex === lastIndex ? 0 : currentIndex + 1;
+    else if (event.key === "ArrowLeft") nextIndex = currentIndex === 0 ? lastIndex : currentIndex - 1;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = lastIndex;
+    else return;
+    event.preventDefault();
+    selectTab(tabs[nextIndex].key);
+  }
 
   useEffect(() => {
     let active = true;
@@ -62,7 +80,7 @@ export default function Report() {
         const data = await apiFetch<{ analysis: AnalysisRecord }>(`/api/analyses/${analysisId}`);
         if (!active) return;
         setRecord(data.analysis);
-        if (!TERMINAL_STATUSES.has(data.analysis.status)) {
+        if (!isTerminalAnalysisStatus(data.analysis.status)) {
           timer = window.setTimeout(load, 1800);
         }
       } catch (err) {
@@ -78,13 +96,15 @@ export default function Report() {
   }, [analysisId]);
 
   const result = useMemo(() => (record && isFullResult(record.analysis_result) ? record.analysis_result : null), [record]);
-  const findings = result?.analysis.findings ?? result?.analysis.issues ?? [];
-  const warnings = result?.analysis.warnings ?? result?.scan.warnings ?? [];
-  const billing = result?.analysis.billing ?? result?.scan.billing ?? {};
-  const metrics = result?.analysis.metrics ?? {};
-  const confidence = result?.analysis.confidence;
-  const resources = result?.scan.resources ?? [];
-  const commands = findings.filter((issue) => issue.command?.valid && issue.command.text);
+  const report = result?.report;
+  const legacyScan = result?.scan;
+  const findings = result?.findings ?? [];
+  const warnings = result?.warnings ?? legacyScan?.warnings ?? [];
+  const billing = result?.billing ?? legacyScan?.billing ?? {};
+  const metrics = result?.metrics ?? {};
+  const confidence = result?.scan_confidence;
+  const resources = result?.resources ?? legacyScan?.resources ?? [];
+  const commands = findings.filter((issue: Issue) => issue.command?.valid && issue.command.text);
 
   async function copy(issue: Issue) {
     const command = issue.command?.valid ? issue.command.text : issue.fix_command;
@@ -119,35 +139,19 @@ export default function Report() {
     URL.revokeObjectURL(url);
   }
 
-  function downloadCSV() {
-    if (!result || !record) return;
-    const lines: string[] = [];
-    lines.push("Section,Service,ID,Type,State,Detail,Value");
-    resources.forEach((r) => {
-      const item = normalizeResource(r);
-      lines.push(csvRow(["Resource", item.service, item.id, item.type, item.state, "", ""]));
-    });
-    findings.forEach((f) => {
-      lines.push(csvRow(["Finding", f.service ?? "", f.resource_id, f.issue_type, f.category ?? "", f.severity, f.estimated_monthly_savings_display ?? ""]));
-    });
-    warnings.forEach((w) => {
-      lines.push(csvRow(["Warning", w.service, w.resource_id ?? "", w.code ?? "", "", w.message, ""]));
-    });
-    const serviceCosts = billing.service_costs_ytd ?? [];
-    serviceCosts.forEach((s) => {
-      lines.push(csvRow(["Billing-Service", s.name ?? s.label ?? "", "", "", "", "", s.display ?? ""]));
-    });
-    const regionCosts = billing.region_costs_ytd ?? [];
-    regionCosts.forEach((r) => {
-      lines.push(csvRow(["Billing-Region", r.name ?? r.label ?? "", "", "", "", "", r.display ?? ""]));
-    });
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `budgetbeagle-report-${record.id}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  async function downloadCSV() {
+    if (!record) return;
+    try {
+      const blob = await apiFetchBlob(`/api/analyses/${record.id}/export/zip`);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `budgetbeagle_export_${record.id}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to download export.");
+    }
   }
 
   if (error) {
@@ -169,7 +173,7 @@ export default function Report() {
     );
   }
 
-  if (!TERMINAL_STATUSES.has(record.status) || !result) {
+  if (!isTerminalAnalysisStatus(record.status) || !result || !report) {
     return <div className="flex items-center gap-3 text-slate-300" aria-live="polite"><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Analysis running</div>;
   }
 
@@ -178,9 +182,9 @@ export default function Report() {
   const scanDate = record.created_at ? formatDateTime(record.created_at) : "Queued";
 
   // §4: Semantic counters
-  const confirmedIssues = result.analysis.confirmed_issues ?? 0;
-  const recommendations = result.analysis.recommendations ?? 0;
-  const observations = result.analysis.observations ?? 0;
+  const confirmedIssues = report.confirmed_issues ?? report.issues_found ?? 0;
+  const recommendations = report.recommendations ?? 0;
+  const observations = report.observations ?? 0;
 
   // §4: Pricing coverage — only count actionable findings
   const actionableFindings = findings.filter((f) => (f.category ?? "").toLowerCase() !== "observation");
@@ -191,7 +195,7 @@ export default function Report() {
     : "Verified price sources only contribute numeric savings.";
 
   // §11: Service scan coverage
-  const coverage = buildCoverage(resources, warnings);
+  const coverage = normalizeCoverage(result.service_coverage, resources, warnings);
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6 overflow-hidden">
@@ -246,8 +250,8 @@ export default function Report() {
           <Metric label="Resources" sublabel="Scanned" value={String(record.resources_scanned)} />
           <Metric label="Confirmed Issues" sublabel="Actionable findings" value={String(confirmedIssues + recommendations)} tone={confirmedIssues + recommendations > 0 ? "rose" : "slate"} />
           <Metric label="Report Confidence" sublabel={confidence?.label ?? metrics.confidence_label ?? "Derived"} value={`${confidence?.score ?? metrics.confidence_score ?? "--"}%`} />
-          <Metric label="Monthly Savings" sublabel="Evidence-backed" value={metrics.monthly_savings_display ?? result.analysis.estimated_monthly_savings_display ?? formatMonthlySavings(record.estimated_savings)} tone="green" />
-          <Metric label="Yearly Savings" sublabel="Annualized" value={metrics.yearly_savings_display ?? result.analysis.yearly_savings?.display ?? "Not enough data"} tone="green" />
+          <Metric label="Monthly Savings" sublabel="Evidence-backed" value={metrics.monthly_savings_display ?? report.estimated_monthly_savings_display ?? formatMonthlySavings(record.estimated_savings)} tone="green" />
+          <Metric label="Yearly Savings" sublabel="Annualized" value={metrics.yearly_savings_display ?? report.yearly_savings?.display ?? "Not enough data"} tone="green" />
         </div>
       </header>
 
@@ -263,7 +267,10 @@ export default function Report() {
               id={`tab-${tab.key}`}
               aria-selected={selected}
               aria-controls={`panel-${tab.key}`}
+              ref={(node) => { tabRefs.current[tab.key] = node; }}
+              tabIndex={selected ? 0 : -1}
               onClick={() => setActiveTab(tab.key)}
+              onKeyDown={(event) => handleTabKeyDown(event, tab.key)}
               className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-md px-3 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-cloud-cyan ${
                 selected ? "bg-cloud-cyan text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
               }`}
@@ -275,7 +282,7 @@ export default function Report() {
         })}
       </nav>
 
-      <div role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`}>
+      <div role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`} tabIndex={0}>
         {activeTab === "overview" && (
           <OverviewTab result={result} billing={billing} warnings={warnings} confidence={confidence} findings={findings} coverage={coverage} confirmedIssues={confirmedIssues} recommendations={recommendations} observations={observations} pricingLabel={pricingLabel} pricingDetail={pricingDetail} />
         )}
@@ -295,7 +302,7 @@ type OverviewProps = {
   result: AnalysisResult;
   billing: BillingContext;
   warnings: ScanWarning[];
-  confidence?: { score: number; label: string; basis?: string; factors?: { name: string; effect: string; reason: string }[] };
+  confidence?: ReportConfidence;
   findings: Issue[];
   coverage: CoverageEntry[];
   confirmedIssues: number;
@@ -306,6 +313,7 @@ type OverviewProps = {
 };
 
 function OverviewTab({ result, billing, warnings, confidence, coverage, confirmedIssues, recommendations, observations, pricingLabel, pricingDetail }: OverviewProps) {
+  const summaryText = result.report.summary ?? "Report completed.";
   return (
     <div className="space-y-4">
       {(billing.insights ?? []).map((insight) => (
@@ -327,7 +335,7 @@ function OverviewTab({ result, billing, warnings, confidence, coverage, confirme
           <Layers className="h-5 w-5 text-cloud-cyan" aria-hidden="true" />
           <h2 className="text-lg font-semibold">Summary</h2>
         </div>
-        <p className="mt-3 text-sm leading-7 text-slate-300">{result.analysis.summary}</p>
+        <p className="mt-3 text-sm leading-7 text-slate-300">{summaryText}</p>
         {confidence && <ConfidenceSection confidence={confidence} />}
       </section>
 
@@ -540,7 +548,7 @@ function ResourcesTab({ resources, copied, onCopy }: { resources: unknown[]; cop
                 <div className="min-w-0">
                   <p className="font-medium text-white">{item.service}</p>
                   <div className="mt-1 flex items-center gap-2">
-                    <p className="truncate text-sm text-slate-400">{item.id}</p>
+                    <p className="break-all text-sm text-slate-400">{item.id}</p>
                     <button
                       type="button"
                       onClick={() => onCopy(item.id, `res-m-${item.id}`)}
@@ -633,6 +641,9 @@ function WarningsTab({ warnings, copied, onCopy }: { warnings: ScanWarning[]; co
 function FindingCard({ issue, copied, onCopy }: { issue: Issue; copied: string | null; onCopy: (issue: Issue) => void }) {
   const savings = issue.estimated_monthly_savings_display ?? formatMonthlySavings(issue.estimated_monthly_savings);
   const maxAvoidable = issue.maximum_monthly_avoidable_cost_display;
+  const findingConfidenceScore = issue.finding_confidence?.score ?? issue.confidence_score ?? confidencePercent(issue.confidence);
+  const findingConfidenceLabel = issue.finding_confidence?.label ?? "Finding";
+  const savingsConfidence = issue.savings_confidence;
 
   return (
     <article className="rounded-lg border border-cloud-line bg-cloud-panel p-5">
@@ -641,7 +652,8 @@ function FindingCard({ issue, copied, onCopy }: { issue: Issue; copied: string |
           <div className="flex flex-wrap gap-2">
             <Badge label={issue.category ?? "Recommendation"} tone="slate" />
             <Badge label={issue.severity} tone={severityTone(issue.severity)} />
-            <Badge label={`${issue.confidence_score ?? confidencePercent(issue.confidence)}% confidence`} tone="green" />
+            <Badge label={`${findingConfidenceLabel} ${findingConfidenceScore}% finding confidence`} tone="green" />
+            {savingsConfidence && <Badge label={`${savingsConfidence.label} savings confidence`} tone="cyan" />}
           </div>
           <h2 className="mt-3 text-lg font-semibold text-white">{issue.issue_type}</h2>
           <p className="mt-1 break-all text-sm text-slate-400">{issue.service ?? "AWS"} / {issue.resource_id}</p>
@@ -650,8 +662,8 @@ function FindingCard({ issue, copied, onCopy }: { issue: Issue; copied: string |
           <p className="text-sm text-slate-500">Savings</p>
           <p className="text-lg font-semibold text-cloud-green">{savings}</p>
           {savings === "Not enough data" && (
-            <p className="mt-1 max-w-[200px] text-xs text-slate-500" title="No evidence-backed action with verified pricing is currently available.">
-              No verified pricing available
+            <p className="mt-1 max-w-[220px] text-xs text-slate-500">
+              Savings confidence not applicable without numeric savings.
             </p>
           )}
         </div>
@@ -715,13 +727,13 @@ function WarningCard({ warning, copied, onCopy }: { warning: ScanWarning; copied
       {warning.resource_id && (
         <div className="mt-2 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
           <span className="text-amber-200/70">Resource:</span>
-          <span className="text-white">{warning.resource_id}</span>
+          <span className="break-all text-white">{warning.resource_id}</span>
         </div>
       )}
       {warning.permission && (
         <div className="mt-1 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
           <span className="text-amber-200/70">Missing permission:</span>
-          <code className="text-amber-200">{warning.permission}</code>
+          <code className="break-all text-amber-200">{warning.permission}</code>
         </div>
       )}
       <div className="mt-1 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
@@ -774,7 +786,7 @@ function WarningCard({ warning, copied, onCopy }: { warning: ScanWarning; copied
 
 // ── Confidence Section ─────────────────────────────────────────────────
 
-function ConfidenceSection({ confidence }: { confidence: { score: number; label: string; basis?: string; factors?: { name: string; effect: string; reason: string }[] } }) {
+function ConfidenceSection({ confidence }: { confidence: ReportConfidence }) {
   const [open, setOpen] = useState(false);
   const factors = confidence.factors ?? [];
   return (
@@ -816,6 +828,24 @@ type CoverageEntry = {
   count: number;
   label: string;
 };
+
+function normalizeCoverage(coverage: ServiceCoverage[] | undefined, resources: unknown[], warnings: ScanWarning[]): CoverageEntry[] {
+  if (!coverage?.length) return buildCoverage(resources, warnings);
+  return coverage.map((entry) => ({
+    service: entry.service,
+    status: entry.status as CoverageEntry["status"],
+    count: entry.count,
+    label: entry.label ?? coverageLabel(entry.status, entry.count),
+  }));
+}
+
+function coverageLabel(status: string, count: number): string {
+  if (status === "completed_with_warnings") return `Completed with warnings - ${count} resource${count !== 1 ? "s" : ""}`;
+  if (status === "completed") return `Completed - ${count} resource${count !== 1 ? "s" : ""}`;
+  if (status === "failed") return "Failed";
+  if (status === "skipped") return "Skipped";
+  return "Completed - no resources";
+}
 
 function buildCoverage(resources: unknown[], warnings: ScanWarning[]): CoverageEntry[] {
   const SUPPORTED_SERVICES = ["EC2", "EBS", "S3", "RDS", "Load Balancing", "Elastic IP", "NAT Gateway"];

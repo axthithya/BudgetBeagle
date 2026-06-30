@@ -51,12 +51,18 @@ export type BillingContext = {
   error?: { code?: string; message?: string; permission?: string } | null;
 };
 
+export type ConfidenceFactor = {
+  name: string;
+  effect: "positive" | "neutral" | "negative" | string;
+  reason: string;
+};
+
 export type ReportConfidence = {
-  score: number;
+  score?: number;
   label: string;
   level?: string;
   basis?: string;
-  factors?: { name: string; effect: string; reason: string }[];
+  factors?: ConfidenceFactor[];
 };
 
 export type ReportMetrics = {
@@ -85,13 +91,15 @@ export type AwsCommand = {
 
 export type Issue = {
   id?: string;
-  category?: "Issue" | "Recommendation" | "Observation" | string;
+  category?: "Confirmed issue" | "Recommendation" | "Observation" | string;
   service?: string;
   resource_id: string;
   issue_type: string;
   severity: "high" | "medium" | "low" | string;
   confidence?: "high" | "medium" | "low" | string;
   confidence_score?: number;
+  finding_confidence?: ReportConfidence;
+  savings_confidence?: ReportConfidence;
   explanation: string;
   ai_explanation?: string;
   evidence?: Record<string, unknown>;
@@ -109,6 +117,16 @@ export type Issue = {
   fix_command?: string;
 };
 
+export type AnalysisStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "completed_with_warnings"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | string;
+
 export type AnalysisRecord = {
   id: number;
   user_id: number;
@@ -117,42 +135,60 @@ export type AnalysisRecord = {
   resources_scanned: number;
   issues_found: number;
   estimated_savings: string;
-  analysis_result: AnalysisResult | { error?: string } | Record<string, never>;
-  status: "queued" | "running" | "completed" | "completed_with_warnings" | "failed" | string;
+  analysis_result: AnalysisResult | { error?: string; reason?: string } | Record<string, never>;
+  status: AnalysisStatus;
   created_at: string | null;
 };
 
+export type AnalysisReportSummary = {
+  status?: string;
+  summary: string;
+  yearly_savings?: { amount_usd?: number | null; display?: string; basis?: string };
+  estimated_monthly_savings: string | number | null;
+  estimated_monthly_savings_display?: string;
+  potential_monthly_savings?: { amount_usd?: number | null; display?: string; basis?: string };
+  potential_maximum_avoidable_cost?: { amount_usd?: number | null; display?: string; basis?: string };
+  savings_confidence?: ReportConfidence;
+  resources_scanned: number;
+  issues_found: number;
+  confirmed_issues?: number;
+  recommendations?: number;
+  observations?: number;
+  warnings_count?: number;
+  notes?: string[];
+};
+
+export type ServiceCoverage = {
+  service: string;
+  status: "completed" | "completed_with_warnings" | "no_resources" | "skipped" | "failed" | string;
+  count: number;
+  label?: string;
+};
+
 export type AnalysisResult = {
-  region: string;
+  schema_version?: string;
+  region?: string;
   resource_group?: string | null;
+  report: AnalysisReportSummary;
   scan: {
     account_id?: string | null;
-    billing?: BillingContext;
-    resources: unknown[];
+    identity_arn?: string | null;
+    region?: string;
+    resource_group?: string | null;
     errors?: { service: string; code: string; message: string }[];
     warnings?: ScanWarning[];
-  };
-  analysis: {
-    status?: string;
-    summary: string;
-    ai_summary?: string;
-    issues: Issue[];
-    findings?: Issue[];
-    warnings?: ScanWarning[];
     billing?: BillingContext;
-    metrics?: ReportMetrics;
-    confidence?: ReportConfidence;
-    yearly_savings?: { amount_usd?: number | null; display?: string; basis?: string };
-    estimated_monthly_savings: string | number | null;
-    estimated_monthly_savings_display?: string;
-    resources_scanned: number;
-    issues_found: number;
-    confirmed_issues?: number;
-    recommendations?: number;
-    observations?: number;
-    warnings_count?: number;
-    notes?: string[];
+    resources?: unknown[];
   };
+  resources: unknown[];
+  findings: Issue[];
+  warnings: ScanWarning[];
+  billing?: BillingContext;
+  metrics?: ReportMetrics;
+  scan_confidence?: ReportConfidence;
+  service_coverage?: ServiceCoverage[];
+  ai_enrichment?: { status?: "none" | "partial" | "completed" | "failed" | string; summary?: string; notes?: string[] };
+  analysis?: Partial<AnalysisReportSummary>;
 };
 
 export type AwsStatus = {
@@ -213,6 +249,24 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
   }
 
   return response.json() as Promise<T>;
+}
+
+export async function apiFetchBlob(path: string, options: RequestInit = {}): Promise<Blob> {
+  const headers = new Headers(options.headers);
+  const token = getToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed with ${response.status}`);
+  }
+  return response.blob();
 }
 
 export function websocketUrl(path: string) {

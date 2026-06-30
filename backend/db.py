@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from dotenv import load_dotenv
@@ -116,7 +116,7 @@ def fail_analysis(db: Session, analysis_id: int, message: str) -> Analysis | Non
     if not analysis:
         return None
     analysis.status = "failed"
-    analysis.analysis_result = {"error": message}
+    analysis.analysis_result = {"error": message, "reason": message}
     db.commit()
     db.refresh(analysis)
     return analysis
@@ -127,7 +127,7 @@ def cancel_analysis(db: Session, analysis_id: int, message: str) -> Analysis | N
     if not analysis:
         return None
     analysis.status = "cancelled"
-    analysis.analysis_result = {"error": message}
+    analysis.analysis_result = {"error": message, "reason": message}
     db.commit()
     db.refresh(analysis)
     return analysis
@@ -138,10 +138,72 @@ def cleanup_stale_jobs(db: Session) -> int:
     count = len(stale_analyses)
     for analysis in stale_analyses:
         analysis.status = "interrupted"
-        analysis.analysis_result = {"error": "Analysis was interrupted by server restart."}
+        analysis.analysis_result = {"error": "Analysis was interrupted by server restart.", "reason": "Analysis was interrupted by server restart."}
     if count > 0:
         db.commit()
     return count
+
+
+def cleanup_history_retention(db: Session) -> int:
+    if not _env_bool("ANALYSIS_HISTORY_RETENTION_ENABLED", False):
+        return 0
+
+    max_records = _env_int_optional("ANALYSIS_HISTORY_MAX_RECORDS")
+    retention_days = _env_int_optional("ANALYSIS_HISTORY_RETENTION_DAYS")
+    if max_records is None and retention_days is None:
+        return 0
+
+    deleted_count = 0
+    users = db.query(User).all()
+    for user in users:
+        if max_records is not None and max_records >= 0:
+            keep_ids = [
+                row.id
+                for row in db.query(Analysis.id)
+                .filter(Analysis.user_id == user.id)
+                .order_by(Analysis.created_at.desc())
+                .limit(max_records)
+                .all()
+            ]
+            query = db.query(Analysis).filter(Analysis.user_id == user.id)
+            if keep_ids:
+                query = query.filter(Analysis.id.notin_(keep_ids))
+            for analysis in query.all():
+                db.delete(analysis)
+                deleted_count += 1
+
+        if retention_days is not None and retention_days >= 0:
+            cutoff = utcnow() - timedelta(days=retention_days)
+            stale = (
+                db.query(Analysis)
+                .filter(Analysis.user_id == user.id)
+                .filter(Analysis.created_at < cutoff)
+                .all()
+            )
+            for analysis in stale:
+                db.delete(analysis)
+                deleted_count += 1
+
+    if deleted_count > 0:
+        db.commit()
+    return deleted_count
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int_optional(name: str) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def serialize_analysis(analysis: Analysis) -> dict[str, Any]:

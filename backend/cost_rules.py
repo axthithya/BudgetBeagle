@@ -50,10 +50,11 @@ def build_cost_report(
 
     total = _total_savings(findings)
     max_avoidable = _total_maximum_avoidable_cost(findings)
-    confirmed_issues = sum(1 for item in findings if item.get("category") == "Issue")
+    confirmed_issues = sum(1 for item in findings if item.get("category") == "Confirmed issue")
     recommendations = sum(1 for item in findings if item.get("category") == "Recommendation")
     observations = sum(1 for item in findings if item.get("category") == "Observation")
     confidence = _overall_confidence(findings, warnings, billing, resources)
+    savings_confidence = _aggregate_savings_confidence(total["amount_usd"])
     yearly_savings = _annualized(total["amount_usd"])
     monthly_account_average = _period_average(billing.get("account_total_ytd_usd"), billing)
     monthly_region_average = _period_average(billing.get("selected_region_ytd_usd"), billing)
@@ -62,7 +63,6 @@ def build_cost_report(
     return {
         "status": status,
         "summary": _summary(len(resources), confirmed_issues, recommendations, len(warnings), total, max_avoidable),
-        "issues": findings,
         "findings": findings,
         "warnings": warnings,
         "billing": billing,
@@ -72,7 +72,8 @@ def build_cost_report(
         "potential_monthly_savings": total,
         "potential_maximum_avoidable_cost": max_avoidable,
         "yearly_savings": yearly_savings,
-        "confidence": confidence,
+        "scan_confidence": confidence,
+        "savings_confidence": savings_confidence,
         "metrics": {
             "account_total_ytd_usd": billing.get("account_total_ytd_usd"),
             "account_total_ytd_display": format_money(billing.get("account_total_ytd_usd")),
@@ -101,6 +102,8 @@ def format_monthly_savings(value: Any) -> str:
     numeric = _to_float(value)
     if numeric is None:
         return "Not enough data"
+    if abs(numeric) < 0.005:
+        numeric = 0.0
     return f"${numeric:.2f}/month"
 
 
@@ -108,6 +111,8 @@ def format_money(value: Any) -> str:
     numeric = _to_float(value)
     if numeric is None:
         return "Not enough data"
+    if abs(numeric) < 0.005:
+        numeric = 0.0
     return f"${numeric:.2f}"
 
 
@@ -221,7 +226,7 @@ def _ebs_findings(resource: dict[str, Any], region: str) -> list[dict[str, Any]]
         }
         return [
             _finding(
-                category="Issue",
+                category="Confirmed issue",
                 service="EBS",
                 resource_id=volume_id,
                 issue_type="Unattached EBS volume",
@@ -361,7 +366,7 @@ def _elastic_ip_findings(resource: dict[str, Any], region: str) -> list[dict[str
     }
     return [
         _finding(
-            category="Issue",
+            category="Confirmed issue",
             service="ElasticIP",
             resource_id=_resource_id(resource),
             issue_type="Unassociated Elastic IP",
@@ -489,6 +494,7 @@ def _finding(
         "severity": severity,
         "confidence": confidence,
         "confidence_score": _confidence_score(confidence),
+        "finding_confidence": _finding_confidence(confidence),
         "explanation": explanation,
         "evidence": evidence,
         "pricing_status": pricing_status,
@@ -502,6 +508,9 @@ def _finding(
         "command": command,
         "fix_command": command["text"] if command else "",
     }
+    savings_confidence = _savings_confidence(estimated_monthly_savings, pricing_status, savings_basis)
+    if savings_confidence is not None:
+        payload["savings_confidence"] = savings_confidence
     if extra:
         payload.update(extra)
     return payload
@@ -605,80 +614,49 @@ def _period_average(amount: Any, billing: dict[str, Any]) -> float | None:
 
 def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str, Any]], billing: dict[str, Any], resources: list[dict[str, Any]]) -> dict[str, Any]:
     factors: list[dict[str, str]] = []
+    supported_services = {"EC2", "EBS", "S3", "RDS", "ELB", "CLASSICELB", "NATGATEWAY", "ELASTICIP"}
+    services_scanned = {str(resource.get("service") or "").upper() for resource in resources}
+    valid_services = services_scanned.intersection(supported_services)
+    warning_count = len(warnings)
+    warning_penalty = min(warning_count * 7, 35)
+    score = 95 if valid_services else 80
 
-    # --- Scan completeness ---
-    SUPPORTED_SERVICES = {"EC2", "EBS", "S3", "RDS", "ELB", "CLASSICELB", "NATGATEWAY", "ELASTICIP"}
-    services_scanned = {str(r.get("service") or "").upper() for r in resources}
-    valid_services = services_scanned.intersection(SUPPORTED_SERVICES)
-    warn_services = {str(w.get("service") or "").upper() for w in warnings}
-    
-    completed_services = [s for s in valid_services if s not in warn_services]
-    limited_services = [s for s in valid_services if s in warn_services]
-
-    score = 90
-    
-    if completed_services:
+    if valid_services:
         factors.append({
             "name": "Service scan coverage",
             "effect": "positive",
-            "reason": f"Completed: {', '.join(sorted(completed_services))}.",
+            "reason": f"Scanned supported services: {', '.join(sorted(valid_services))}.",
         })
-    if limited_services:
+    else:
         factors.append({
-            "name": "Service scan limitations",
-            "effect": "negative",
-            "reason": f"Completed with limitations: {', '.join(sorted(limited_services))}.",
+            "name": "Service scan coverage",
+            "effect": "neutral",
+            "reason": "No supported resources were returned for this scan.",
         })
 
-    # --- Finding evidence scores ---
-    actionable_findings = [f for f in findings if f.get("category", "").lower() != "observation"]
-    if actionable_findings:
-        finding_score = round(sum(_confidence_score(str(item.get("confidence") or "low")) for item in actionable_findings) / len(actionable_findings))
-        avg_label = "high" if finding_score >= 80 else "medium" if finding_score >= 65 else "low"
-        factors.append({
-            "name": "Finding evidence quality",
-            "effect": "positive" if avg_label != "low" else "negative",
-            "reason": f"Average confidence of actionable findings is {avg_label} ({finding_score}%).",
-        })
-        score = (score + finding_score) // 2
-
-    # --- Warning penalty ---
-    warning_count = len(warnings)
-    warning_penalty = min(warning_count * 5, 25)
-    score -= warning_penalty
-    if warning_count > 0:
+    if warning_count:
+        score -= warning_penalty
         factors.append({
             "name": "Scan warnings",
             "effect": "negative",
-            "reason": f"{warning_count} warning(s) reduced confidence by {warning_penalty} points.",
+            "reason": f"{warning_count} warning(s) reduced scan confidence by {warning_penalty} points.",
         })
 
-    # --- Billing penalty ---
     if billing.get("status") not in {"available", None}:
         score -= 10
         factors.append({
             "name": "Cost Explorer",
             "effect": "negative",
-            "reason": "Billing permission was unavailable.",
+            "reason": "Billing data was unavailable, but resource scan confidence is kept separate from savings confidence.",
         })
     elif billing.get("status") == "available":
+        if not valid_services:
+            score += 10
         factors.append({
             "name": "Cost Explorer",
             "effect": "positive",
-            "reason": "Billing data was available.",
+            "reason": "Billing data was available for context.",
         })
-
-    # --- Metric duration factors ---
-    for finding in actionable_findings:
-        evidence = finding.get("evidence", {})
-        duration_str = evidence.get("Actual covered duration", "")
-        if "less than" in str(duration_str) or "0." in str(duration_str):
-            factors.append({
-                "name": f"{finding.get('service', 'Unknown')} metric duration",
-                "effect": "negative",
-                "reason": f"Only {duration_str} of data were available for {finding.get('resource_id', 'a resource')}.",
-            })
-            break  # Avoid flooding factors
 
     score = max(35, min(95, score))
     label = "High" if score >= 80 else "Medium" if score >= 65 else "Low"
@@ -686,8 +664,62 @@ def _overall_confidence(findings: list[dict[str, Any]], warnings: list[dict[str,
         "score": score,
         "label": label,
         "level": label.lower(),
-        "basis": "Report data confidence represents scan completeness, evidence quality, and optional data availability.",
+        "basis": "Scan confidence represents scan completeness, service coverage, warnings, and optional data availability only.",
         "factors": factors,
+    }
+
+
+def _finding_confidence(value: str) -> dict[str, Any]:
+    score = _confidence_score(value)
+    label = "High" if score >= 80 else "Medium" if score >= 65 else "Low"
+    return {
+        "score": score,
+        "label": label,
+        "level": label.lower(),
+        "basis": "Finding confidence represents evidence quality for this specific finding.",
+        "factors": [{"name": "Finding evidence", "effect": "positive" if score >= 75 else "negative", "reason": f"Finding evidence was rated {label.lower()}."}],
+    }
+
+
+def _savings_confidence(value: Any, pricing_status: str, savings_basis: str) -> dict[str, Any] | None:
+    if not isinstance(value, (int, float)):
+        return None
+    if pricing_status == "verified":
+        score = 90
+        label = "High"
+        reason = "Savings use verified pricing."
+    elif pricing_status == "not_applicable" and float(value) == 0.0:
+        score = 95
+        label = "High"
+        reason = "Zero savings are deterministic for the observed resource state."
+    else:
+        score = 70
+        label = "Medium"
+        reason = "Savings are numeric but pricing evidence is limited."
+    return {
+        "score": score,
+        "label": label,
+        "level": label.lower(),
+        "basis": savings_basis,
+        "factors": [{"name": "Savings evidence", "effect": "positive", "reason": reason}],
+    }
+
+
+def _aggregate_savings_confidence(value: Any) -> dict[str, Any]:
+    if not isinstance(value, (int, float)):
+        return {
+            "level": "not_applicable",
+            "label": "Not applicable",
+            "basis": "Savings confidence is not applicable because total savings are not numeric.",
+            "factors": [{"name": "Numeric savings", "effect": "neutral", "reason": "No numeric evidence-backed savings were available."}],
+        }
+    label = "High" if float(value) == 0.0 else "Medium"
+    return {
+        "score": 95 if float(value) == 0.0 else 80,
+        "label": label,
+        "level": label.lower(),
+        "basis": "Aggregate savings confidence only covers numeric evidence-backed savings.",
+        "factors": [{"name": "Numeric savings", "effect": "positive", "reason": "At least one finding has numeric savings evidence."}],
     }
 
 

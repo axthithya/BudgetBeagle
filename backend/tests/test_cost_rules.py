@@ -334,7 +334,7 @@ def test_billing_context_feeds_report_metrics_and_confidence() -> None:
     assert report["metrics"]["account_total_ytd_display"] == "$18.45"
     assert report["metrics"]["selected_region_ytd_display"] == "$0.00"
     assert report["metrics"]["monthly_account_average_display"] == "$3.08/month"
-    assert report["confidence"]["score"] == 90
+    assert report["scan_confidence"]["score"] == 90
 
 
 def test_cost_explorer_access_denied_produces_warning() -> None:
@@ -387,7 +387,7 @@ def test_confidence_includes_explainable_factors() -> None:
         ),
         pricing_resolver=StaticPrice(_missing_price()),
     )
-    confidence = report["confidence"]
+    confidence = report["scan_confidence"]
     assert "score" in confidence
     assert "factors" in confidence
     assert isinstance(confidence["factors"], list)
@@ -398,13 +398,28 @@ def test_confidence_includes_explainable_factors() -> None:
         assert "name" in factor
         assert "effect" in factor
         assert "reason" in factor
-        assert factor["effect"] in ("positive", "negative")
+        assert factor["effect"] in ("positive", "negative", "neutral")
 
 
 def test_confidence_level_field_present() -> None:
     report = build_cost_report(_scan([]))
-    assert "level" in report["confidence"]
-    assert report["confidence"]["level"] in ("high", "medium", "low")
+    assert "level" in report["scan_confidence"]
+    assert report["scan_confidence"]["level"] in ("high", "medium", "low")
+
+
+def test_confidence_model_separates_scan_finding_and_savings_confidence() -> None:
+    unknown_report = build_cost_report(_scan([_ec2(_cpu(1.5, datapoints=48, hours=48))]), pricing_resolver=StaticPrice(_missing_price()))
+    unknown_finding = unknown_report["findings"][0]
+    assert "scan_confidence" in unknown_report
+    assert "finding_confidence" in unknown_finding
+    assert "savings_confidence" not in unknown_finding
+    assert unknown_report["savings_confidence"]["level"] == "not_applicable"
+
+    numeric_report = build_cost_report(_scan([_s3("absent", object_count=0, size_bytes=0)]))
+    numeric_finding = numeric_report["findings"][0]
+    assert numeric_finding["estimated_monthly_savings"] == 0.0
+    assert numeric_finding["savings_confidence"]["level"] == "high"
+    assert numeric_report["savings_confidence"]["level"] == "high"
 
 
 def test_warnings_have_structured_fields() -> None:
