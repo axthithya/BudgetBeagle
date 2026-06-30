@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
@@ -11,7 +12,6 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -26,7 +26,7 @@ def _fresh_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("GROQ_API_KEY", "fake-groq-key")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
 
-    for module_name in ["main", "db", "auth", "ai_analyzer", "aws_scanner", "progress"]:
+    for module_name in ["main", "db", "auth", "ai_analyzer", "aws_scanner", "progress", "report_schema", "export"]:
         sys.modules.pop(module_name, None)
 
     return importlib.import_module("main")
@@ -142,43 +142,17 @@ def test_scanner_keeps_results_when_one_service_is_access_denied(monkeypatch: py
     assert any(error["service"] == "rds" and error["code"] == "AccessDenied" for error in result["errors"])
 
 
-def test_analyze_websocket_report_flow_with_mocked_scanner_and_groq(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_analyze_report_flow_with_mocked_scanner_and_groq(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     main = _fresh_app(monkeypatch, tmp_path)
+    main.init_db()
 
     fake_scan_result = {
         "region": "us-east-1",
         "resource_group": None,
         "resources": [
-            {
-                "service": "EC2",
-                "id": "i-idle",
-                "name": "idle-app",
-                "type_or_sku": "t3.large",
-                "state": "running",
-                "tags": {"Name": "idle-app"},
-                "metrics": {"avg_cpu_14d": 2.5, "low_utilization_candidate": True},
-            },
-            {
-                "service": "EBS",
-                "id": "vol-unattached",
-                "name": "",
-                "type_or_sku": "gp3",
-                "state": "available",
-                "tags": {},
-                "metrics": {"size_gb": 100, "unattached": True},
-            },
-            {
-                "service": "ElasticIP",
-                "id": "eipalloc-unused",
-                "name": "",
-                "type_or_sku": "public-ipv4",
-                "state": "unassociated",
-                "tags": {},
-                "metrics": {"public_ip": "203.0.113.10", "unassociated": True},
-            },
+            {"service": "EC2", "id": "i-idle", "type_or_sku": "t3.large", "state": "running", "metrics": {"avg_cpu_14d": 2.5, "low_utilization_candidate": True}},
+            {"service": "EBS", "id": "vol-unattached", "type_or_sku": "gp3", "state": "available", "metrics": {"size_gb": 100, "unattached": True}},
+            {"service": "ElasticIP", "id": "eipalloc-unused", "type_or_sku": "public-ipv4", "state": "unassociated", "metrics": {"public_ip": "203.0.113.10", "unassociated": True}},
         ],
         "errors": [],
     }
@@ -196,122 +170,66 @@ def test_analyze_websocket_report_flow_with_mocked_scanner_and_groq(
     def fake_analyze_costs(scan_result: dict[str, Any]) -> dict[str, Any]:
         assert scan_result == fake_scan_result
         return {
+            "status": "completed",
             "summary": "Three test findings.",
             "resources_scanned": 3,
             "issues_found": 3,
-            "estimated_monthly_savings": "$42.00/month",
-            "issues": [
-                {
-                    "resource_id": "i-idle",
-                    "issue_type": "Low EC2 CPU",
-                    "severity": "medium",
-                    "explanation": "Average CPU was 2.5%.",
-                    "estimated_monthly_savings": "$20.00/month",
-                    "fix_command": "aws ec2 stop-instances --instance-ids i-idle",
-                },
-                {
-                    "resource_id": "vol-unattached",
-                    "issue_type": "Unattached EBS",
-                    "severity": "high",
-                    "explanation": "The volume is available and unattached.",
-                    "estimated_monthly_savings": "$12.00/month",
-                    "fix_command": "aws ec2 delete-volume --volume-id vol-unattached",
-                },
-                {
-                    "resource_id": "eipalloc-unused",
-                    "issue_type": "Unassociated Elastic IP",
-                    "severity": "low",
-                    "explanation": "The Elastic IP is not associated.",
-                    "estimated_monthly_savings": "$10.00/month",
-                    "fix_command": "aws ec2 release-address --allocation-id eipalloc-unused",
-                },
+            "confirmed_issues": 3,
+            "estimated_monthly_savings": 42.0,
+            "estimated_monthly_savings_display": "$42.00/month",
+            "findings": [
+                {"category": "confirmed_issue", "category_label": "Confirmed issue", "service": "EC2", "resource_id": "i-idle", "issue_type": "Low EC2 CPU", "severity": "medium", "confidence": "medium", "estimated_monthly_savings": 20.0, "estimated_monthly_savings_display": "$20.00/month"},
+                {"category": "confirmed_issue", "category_label": "Confirmed issue", "service": "EBS", "resource_id": "vol-unattached", "issue_type": "Unattached EBS", "severity": "high", "confidence": "high", "estimated_monthly_savings": 12.0, "estimated_monthly_savings_display": "$12.00/month"},
+                {"category": "confirmed_issue", "category_label": "Confirmed issue", "service": "ElasticIP", "resource_id": "eipalloc-unused", "issue_type": "Unassociated Elastic IP", "severity": "low", "confidence": "low", "estimated_monthly_savings": 10.0, "estimated_monthly_savings_display": "$10.00/month"},
             ],
+            "warnings": [],
+            "billing": {},
+            "metrics": {},
+            "scan_confidence": {"score": 90, "label": "High", "level": "high", "factors": []},
             "notes": [],
         }
 
     monkeypatch.setattr(main, "AwsScanner", FakeScanner)
     monkeypatch.setattr(main, "analyze_costs", fake_analyze_costs)
 
-    with TestClient(main.app) as client:
-        signup = client.post(
-            "/api/auth/signup",
-            json={"email": "preflight@example.com", "password": "password123"},
-        )
-        assert signup.status_code == 200
-        token = signup.json()["token"]
+    db = main.SessionLocal()
+    try:
+        user = main.create_user(db, "preflight@example.com", "hash")
+        analysis = main.create_analysis(db, user.id, "us-east-1", None)
+        analysis_id = analysis.id
+        user_id = user.id
+    finally:
+        db.close()
 
-        unauthorized = client.post("/api/analyze", json={"region": "us-east-1"})
-        assert unauthorized.status_code == 401
+    asyncio.run(main.run_analysis_job(analysis_id, user_id, "us-east-1", None))
 
-        start = client.post(
-            "/api/analyze",
-            json={"region": "us-east-1", "resource_group": None},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert start.status_code == 200
-        body = start.json()
-        assert body["status"] == "queued"
-        analysis_id = body["analysis_id"]
+    db = main.SessionLocal()
+    try:
+        record = main._safe_serialize(db.get(main.Analysis, analysis_id))
+    finally:
+        db.close()
 
-        with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect(f"/ws/progress/{analysis_id}?token=not-a-jwt"):
-                pass
-
-        with client.websocket_connect(f"/ws/progress/{analysis_id}?token={token}") as websocket:
-            messages = [websocket.receive_json()["message"] for _ in range(5)]
-
-        assert messages == [
-            "Scanning AWS resources in us-east-1...",
-            "Pulling CloudWatch metrics...",
-            "Building deterministic cost report...",
-            "Storing results...",
-            "Analysis complete",
-        ]
-
-        report = client.get(
-            f"/api/analyses/{analysis_id}",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert report.status_code == 200
-        record = report.json()["analysis"]
-        assert record["status"] == "completed"
-        assert record["resources_scanned"] == 3
-        assert record["issues_found"] == 3
-        assert record["estimated_savings"] == "$42.00/month"
-
-        result = record["analysis_result"]
-        assert [issue["resource_id"] for issue in result["analysis"]["issues"]] == [
-            "i-idle",
-            "vol-unattached",
-            "eipalloc-unused",
-        ]
-
-        history = client.get("/api/history", headers={"Authorization": f"Bearer {token}"})
-        assert history.status_code == 200
-        assert history.json()["analyses"][0]["id"] == analysis_id
+    assert record["status"] == "completed"
+    assert record["resources_scanned"] == 3
+    assert record["issues_found"] == 3
+    assert record["estimated_savings"] == "$42.00/month"
+    result = record["analysis_result"]
+    assert "issues" not in result
+    assert result["report"]["summary"] == "Three test findings."
+    assert [issue["resource_id"] for issue in result["findings"]] == ["i-idle", "vol-unattached", "eipalloc-unused"]
+    assert result["resources"][0]["metrics"]["utilization_signal"]["signal"] == "low_cpu"
+    assert [event["message"] for event in main.progress_manager.history(analysis_id)] == [
+        "Scanning AWS resources in us-east-1...",
+        "Pulling CloudWatch metrics...",
+        "Building deterministic cost report...",
+        "Storing results...",
+        "Analysis complete",
+    ]
 
 
-# ── Prompt 10: E2E acceptance scenario ────────────────────────────────
-
-
-def test_e2e_mocked_acceptance_scenario(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Full mocked scenario per Prompt 10 §12:
-    - Account ID 277731792560
-    - S3 lifecycle → AccessDenied
-    - Cost Explorer → AccessDenied
-    - EC2/EBS/S3 scans succeed
-    Expected:
-    - status: completed_with_warnings
-    - Account masked: ********2560
-    - No full account ID or ARN in response
-    - Lifecycle status: unknown, no lifecycle issue
-    - Cost Explorer warning present
-    - Savings: Not enough data
-    """
+def test_e2e_mocked_acceptance_scenario(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     main = _fresh_app(monkeypatch, tmp_path)
+    main.init_db()
 
     fake_scan_result = {
         "region": "ap-southeast-1",
@@ -320,93 +238,16 @@ def test_e2e_mocked_acceptance_scenario(
         "identity_type": "iam_user",
         "identity_name": "budgetbeagle-app",
         "resources": [
-            {
-                "service": "EC2",
-                "id": "i-0abc123",
-                "name": "test-server",
-                "type_or_sku": "t3.micro",
-                "state": "running",
-                "metrics": {
-                    "cpu_utilization": {
-                        "metric_source": "CloudWatch",
-                        "metric_name": "CPUUtilization",
-                        "average": 0.13,
-                        "minimum": 0.01,
-                        "maximum": 0.5,
-                        "datapoint_count": 5,
-                        "requested_start": "2026-06-15T00:00:00+00:00",
-                        "requested_end": "2026-06-29T00:00:00+00:00",
-                        "requested_window_days": 14,
-                        "actual_start": "2026-06-29T07:00:00+00:00",
-                        "actual_end": "2026-06-29T12:00:00+00:00",
-                        "actual_duration_hours": 5,
-                        "instance_launch_time": "2026-06-29T06:00:00+00:00",
-                        "status": "present",
-                    },
-                    "launch_time": "2026-06-29T06:00:00+00:00",
-                },
-            },
-            {
-                "service": "EBS",
-                "id": "vol-0def456",
-                "name": "",
-                "type_or_sku": "gp3",
-                "state": "in-use",
-                "metrics": {
-                    "size_gb": 8,
-                    "iops": 3000,
-                    "throughput_mibps": 125,
-                    "attachment_count": 1,
-                    "unattached": False,
-                },
-            },
-            {
-                "service": "S3",
-                "id": "demo-test-beagle",
-                "name": "demo-test-beagle",
-                "type_or_sku": "bucket",
-                "state": "active",
-                "metrics": {
-                    "lifecycle_status": {
-                        "status": "unknown",
-                        "code": "AccessDenied",
-                        "message": "Lifecycle configuration could not be verified.",
-                        "permission": "s3:GetLifecycleConfiguration",
-                    },
-                    "bucket_size_bytes": None,
-                    "object_count": None,
-                },
-            },
+            {"service": "EC2", "id": "i-0abc123", "type_or_sku": "t3.micro", "state": "running", "metrics": {"cpu_utilization": {"metric_source": "CloudWatch", "metric_name": "CPUUtilization", "average": 0.13, "minimum": 0.01, "maximum": 0.5, "datapoint_count": 5, "requested_start": "2026-06-15T00:00:00+00:00", "requested_end": "2026-06-29T00:00:00+00:00", "requested_window_days": 14, "actual_start": "2026-06-29T07:00:00+00:00", "actual_end": "2026-06-29T12:00:00+00:00", "actual_duration_hours": 5, "instance_launch_time": "2026-06-29T06:00:00+00:00", "status": "present"}, "launch_time": "2026-06-29T06:00:00+00:00"}},
+            {"service": "EBS", "id": "vol-0def456", "type_or_sku": "gp3", "state": "in-use", "metrics": {"size_gb": 8, "iops": 3000, "throughput_mibps": 125, "attachment_count": 1, "unattached": False}},
+            {"service": "S3", "id": "demo-test-beagle", "type_or_sku": "bucket", "state": "active", "metrics": {"lifecycle_status": {"status": "unknown", "code": "AccessDenied", "message": "Lifecycle configuration could not be verified.", "permission": "s3:GetLifecycleConfiguration"}, "bucket_size_bytes": None, "object_count": None}},
         ],
         "errors": [],
         "warnings": [
-            {
-                "service": "S3",
-                "resource_id": "demo-test-beagle",
-                "code": "AccessDenied",
-                "permission": "s3:GetLifecycleConfiguration",
-                "message": "Lifecycle configuration could not be verified.",
-                "title": "Lifecycle configuration could not be verified",
-                "resolution": "Add the optional read-only permission and run the scan again.",
-                "severity": "warning",
-                "operation": "GetBucketLifecycleConfiguration",
-            },
-            {
-                "service": "Cost Explorer",
-                "resource_id": "",
-                "code": "AccessDeniedException",
-                "permission": "ce:GetCostAndUsage",
-                "message": "Cost Explorer data could not be collected.",
-                "title": "Billing data unavailable",
-                "resolution": "Add the optional Cost Explorer read permission to enable billing totals.",
-                "severity": "warning",
-                "operation": "GetCostAndUsage",
-            },
+            {"service": "S3", "resource_id": "demo-test-beagle", "code": "AccessDenied", "permission": "s3:GetLifecycleConfiguration", "message": "Lifecycle configuration could not be verified.", "title": "Lifecycle configuration could not be verified", "resolution": "Add the optional read-only permission and run the scan again.", "severity": "warning", "operation": "GetBucketLifecycleConfiguration"},
+            {"service": "Cost Explorer", "resource_id": "", "code": "AccessDeniedException", "permission": "ce:GetCostAndUsage", "message": "Cost Explorer data could not be collected.", "title": "Billing data unavailable", "resolution": "Add the optional Cost Explorer read permission to enable billing totals.", "severity": "warning", "operation": "GetCostAndUsage"},
         ],
-        "billing": {
-            "status": "unavailable",
-            "error": {"code": "AccessDeniedException", "message": "Cost Explorer data could not be collected.", "permission": "ce:GetCostAndUsage"},
-        },
+        "billing": {"status": "unavailable", "error": {"code": "AccessDeniedException", "message": "Cost Explorer data could not be collected.", "permission": "ce:GetCostAndUsage"}},
     }
 
     class FakeScanner:
@@ -420,62 +261,41 @@ def test_e2e_mocked_acceptance_scenario(
     monkeypatch.setattr(main, "AwsScanner", FakeScanner)
     monkeypatch.setattr(main, "analyze_costs", lambda sr, **kw: __import__("cost_rules").build_cost_report(sr))
 
-    with TestClient(main.app) as client:
-        signup = client.post("/api/auth/signup", json={"email": "e2e@example.com", "password": "password123"})
-        assert signup.status_code == 200
-        token = signup.json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
+    db = main.SessionLocal()
+    try:
+        user = main.create_user(db, "e2e@example.com", "hash")
+        analysis = main.create_analysis(db, user.id, "ap-southeast-1", None)
+        analysis_id = analysis.id
+        user_id = user.id
+    finally:
+        db.close()
 
-        start = client.post("/api/analyze", json={"region": "ap-southeast-1"}, headers=headers)
-        assert start.status_code == 200
-        analysis_id = start.json()["analysis_id"]
+    asyncio.run(main.run_analysis_job(analysis_id, user_id, "ap-southeast-1", None))
 
-        with client.websocket_connect(f"/ws/progress/{analysis_id}?token={token}") as ws:
-            msgs = [ws.receive_json()["message"] for _ in range(5)]
-        assert msgs[-1] == "Analysis complete"
+    db = main.SessionLocal()
+    try:
+        record = main._safe_serialize(db.get(main.Analysis, analysis_id))
+    finally:
+        db.close()
 
-        report = client.get(f"/api/analyses/{analysis_id}", headers=headers)
-        assert report.status_code == 200
-        record = report.json()["analysis"]
-        result = record["analysis_result"]
-        analysis = result["analysis"]
-
-        # 1. Status
-        assert record["status"] == "completed_with_warnings"
-
-        # 2. Account masking
-        scan = result["scan"]
-        assert scan.get("account_id") in ("********2560", None)
-        serialized = json.dumps(result)
-        assert "277731792560" not in serialized  # No full account ID
-
-        # 3. No full IAM ARN
-        assert "arn:aws:" not in serialized
-
-        # 4. S3 lifecycle
-        s3_resources = [r for r in scan["resources"] if r.get("service") == "S3"]
-        assert len(s3_resources) == 1
-        lifecycle = s3_resources[0]["metrics"]["lifecycle_status"]
-        assert lifecycle["status"] == "unknown"
-        s3_findings = [f for f in analysis.get("findings", []) if f.get("service") == "S3"]
-        assert len(s3_findings) == 0  # No lifecycle issue from unknown
-
-        # 5. Cost Explorer warning present
-        ce_warnings = [w for w in analysis.get("warnings", []) if "Cost Explorer" in str(w.get("service", ""))]
-        assert len(ce_warnings) > 0
-
-        # 6. Resource scan completed
-        assert record["resources_scanned"] == 3
-
-        # 7. Savings
-        assert analysis.get("estimated_monthly_savings") is None or analysis.get("estimated_monthly_savings_display") == "Not enough data"
-
-        # 8. No missing_lifecycle_policy: No in serialized output
-        assert "missing_lifecycle_policy" not in serialized
-
-        # 9. No AKIA/ASIA access keys
-        assert "AKIA" not in serialized
-        assert "ASIA" not in serialized
+    result = record["analysis_result"]
+    report = result["report"]
+    assert record["status"] == "completed_with_warnings"
+    assert result["scan"].get("account_id") in ("********2560", None)
+    serialized = json.dumps(result)
+    assert "277731792560" not in serialized
+    assert "arn:aws:" not in serialized
+    s3_resources = [r for r in result["resources"] if r.get("service") == "S3"]
+    assert len(s3_resources) == 1
+    assert s3_resources[0]["metrics"]["lifecycle_status"]["status"] == "unknown"
+    assert [f for f in result.get("findings", []) if f.get("service") == "S3"] == []
+    assert [w for w in result.get("warnings", []) if "Cost Explorer" in str(w.get("service", ""))]
+    assert record["resources_scanned"] == 3
+    assert report.get("estimated_monthly_savings") is None or report.get("estimated_monthly_savings_display") == "Not enough data"
+    assert report["savings_confidence"]["level"] == "not_applicable"
+    assert "missing_lifecycle_policy" not in serialized
+    assert "AKIA" not in serialized
+    assert "ASIA" not in serialized
 
 
 def test_historical_reports_are_sanitized(

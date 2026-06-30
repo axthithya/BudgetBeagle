@@ -1,12 +1,15 @@
 import { History, LayoutDashboard, LogOut } from "lucide-react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { clearAuth, getUserEmail } from "../lib/api";
+import { cancelPendingRequests, clearAuth, getUserEmail } from "../lib/api";
+import { clearStoredActiveAnalysisId } from "../lib/analysisStatus";
 
 export function Navbar() {
   const navigate = useNavigate();
   const email = getUserEmail();
 
   function logout() {
+    cancelPendingRequests();
+    clearStoredActiveAnalysisId();
     clearAuth();
     navigate("/login", { replace: true });
   }
@@ -47,8 +50,8 @@ export function Navbar() {
           <button
             type="button"
             onClick={logout}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-cloud-line text-slate-300 hover:border-cloud-orange hover:text-white"
-            title="Sign out"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-cloud-line text-slate-300 hover:border-cloud-orange hover:text-white focus:outline-none focus:ring-2 focus:ring-cloud-cyan"
+            aria-label="Sign out"
           >
             <LogOut className="h-4 w-4" aria-hidden="true" />
           </button>

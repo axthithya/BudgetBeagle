@@ -75,11 +75,15 @@ More architecture notes are in [Architecture.MD](./Architecture.MD), and the req
 - Account-wide and selected-region YTD billing summaries when Cost Explorer is available
 - Monthly account billing, service-cost, and billed-region tables
 - Evidence-backed monthly and yearly savings displays
-- Severity and confidence labels for each issue
-- Overall confidence score derived from evidence, warnings, and billing availability
+- Explicit category labels: Confirmed issue, Recommendation, Observation
+- Severity and finding-level confidence scores based on evidence quality
+- Overall scan confidence derived from evidence, warnings, and billing availability
+- Pricing Coverage tracking (Fully priced, Partially priced, Unavailable, Not applicable)
 - Tabbed report views for overview, billing, findings, resources, commands, and warnings
+- Comprehensive Resources table with detailed expandable service properties and metrics
 - Human-readable explanations
 - Copyable `aws` CLI fix commands only when backend validation passes
+- Formatted CSV finding export and canonical JSON history export
 - Read-only AWS scanning behavior
 - SQLite local database by default
 - Docker option for users who prefer containers

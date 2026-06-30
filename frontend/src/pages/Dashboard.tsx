@@ -3,10 +3,13 @@ import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Copy, Check, Play, R
 import { useNavigate } from "react-router-dom";
 import { ProgressTracker } from "../components/ProgressTracker";
 import { apiFetch, AwsStatus, getToken, websocketUrl } from "../lib/api";
+import { clearStoredActiveAnalysisId, getStoredActiveAnalysisId, isFailureAnalysisStatus, isSuccessfulAnalysisStatus, isTerminalAnalysisStatus, storeActiveAnalysisId } from "../lib/analysisStatus";
 
 type RegionsResponse = { regions: string[] };
 type GroupsResponse = { resource_groups: { name: string; arn: string; description?: string }[] };
 type AnalyzeResponse = { analysis_id: number; status: string; websocket_url: string };
+type AnalysisLookupResponse = { analysis: { status: string; analysis_result?: { error?: string; reason?: string } } };
+type ProgressPayload = { event?: string; message?: string; status?: string; details?: { reason?: string } };
 
 const MINIMAL_POLICY = JSON.stringify({
   Version: "2012-10-17",
@@ -60,6 +63,10 @@ const EXTENDED_POLICY = JSON.stringify({
 export default function Dashboard() {
   const navigate = useNavigate();
   const socketRef = useRef<WebSocket | null>(null);
+  const pollingTimerRef = useRef<number | null>(null);
+  const activeAnalysisIdRef = useRef<number | null>(null);
+  const navigatedAnalysisIdsRef = useRef<Set<number>>(new Set());
+  const initialLoadStartedRef = useRef(false);
   const [regions, setRegions] = useState<string[]>([]);
   const [groups, setGroups] = useState<GroupsResponse["resource_groups"]>([]);
   const [region, setRegion] = useState("");
@@ -74,9 +81,21 @@ export default function Dashboard() {
   const [currentAnalysisId, setCurrentAnalysisId] = useState<number | null>(null);
 
   useEffect(() => {
-    loadRegions();
-    loadAwsStatus();
-    return () => socketRef.current?.close();
+    if (!initialLoadStartedRef.current) {
+      initialLoadStartedRef.current = true;
+      loadRegions();
+      loadAwsStatus();
+      const storedAnalysisId = getStoredActiveAnalysisId();
+      if (storedAnalysisId) {
+        setMessages(["Recovering active analysis..."]);
+        startPolling(storedAnalysisId);
+      }
+    }
+    return () => {
+      stopPolling();
+      socketRef.current?.close();
+      socketRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -104,7 +123,7 @@ export default function Dashboard() {
       const data = await apiFetch<AwsStatus>("/api/aws/status");
       setAwsStatus(data);
     } catch {
-      // Non-critical — don't block the UI
+      // Non-critical - don't block the UI
     }
   }
 
@@ -121,44 +140,127 @@ export default function Dashboard() {
     }
   }
 
+  function appendMessage(message: string) {
+    setMessages((current) => (current[current.length - 1] === message ? current : [...current, message]));
+  }
+
+  function stopPolling() {
+    if (pollingTimerRef.current !== null) {
+      window.clearTimeout(pollingTimerRef.current);
+      pollingTimerRef.current = null;
+    }
+  }
+
+  function finishAnalysis(analysisId?: number) {
+    stopPolling();
+    if (analysisId === undefined || activeAnalysisIdRef.current === analysisId) {
+      activeAnalysisIdRef.current = null;
+    }
+    clearStoredActiveAnalysisId(analysisId);
+    setRunning(false);
+    setCurrentAnalysisId((current) => (analysisId === undefined || current === analysisId ? null : current));
+    if (socketRef.current) {
+      const socket = socketRef.current;
+      socketRef.current = null;
+      socket.close();
+    }
+  }
+
+  function navigateToReportOnce(analysisId: number) {
+    if (navigatedAnalysisIdsRef.current.has(analysisId)) return;
+    navigatedAnalysisIdsRef.current.add(analysisId);
+    navigate(`/report/${analysisId}`);
+  }
+
+  async function pollAnalysis(analysisId: number) {
+    if (activeAnalysisIdRef.current !== analysisId) return;
+    try {
+      const res = await apiFetch<AnalysisLookupResponse>(`/api/analyses/${analysisId}`);
+      const status = res.analysis.status;
+      if (isSuccessfulAnalysisStatus(status)) {
+        appendMessage("Analysis complete");
+        finishAnalysis(analysisId);
+        navigateToReportOnce(analysisId);
+        return;
+      }
+      if (isFailureAnalysisStatus(status)) {
+        const reason = res.analysis.analysis_result?.reason ?? res.analysis.analysis_result?.error;
+        appendMessage(reason ?? `Analysis ${status}.`);
+        finishAnalysis(analysisId);
+        return;
+      }
+      if (isTerminalAnalysisStatus(status)) {
+        finishAnalysis(analysisId);
+        return;
+      }
+      startPolling(analysisId, 2000);
+    } catch (err) {
+      finishAnalysis(analysisId);
+      setError("Polling failed: " + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  function startPolling(analysisId: number, delayMs = 0) {
+    stopPolling();
+    activeAnalysisIdRef.current = analysisId;
+    storeActiveAnalysisId(analysisId);
+    setCurrentAnalysisId(analysisId);
+    setRunning(true);
+    const run = () => void pollAnalysis(analysisId);
+    if (delayMs <= 0) {
+      run();
+    } else {
+      pollingTimerRef.current = window.setTimeout(run, delayMs);
+    }
+  }
+
   async function runAnalysis() {
     if (!region) return;
     setError("");
     setMessages([]);
     setRunning(true);
-    socketRef.current?.close();
+    finishAnalysis();
 
     try {
       const data = await apiFetch<AnalyzeResponse>("/api/analyze", {
         method: "POST",
         body: JSON.stringify({ region, resource_group: group || null }),
       });
+      activeAnalysisIdRef.current = data.analysis_id;
+      storeActiveAnalysisId(data.analysis_id);
       setCurrentAnalysisId(data.analysis_id);
+      setRunning(true);
+
       const token = encodeURIComponent(getToken());
       const socket = new WebSocket(`${websocketUrl(data.websocket_url)}?token=${token}`);
       socketRef.current = socket;
 
       socket.onmessage = (event) => {
-        const payload = JSON.parse(event.data) as { message: string };
-        setMessages((current) => [...current, payload.message]);
-        if (payload.message === "Analysis complete") {
-          setRunning(false);
-          setCurrentAnalysisId(null);
-          socket.close();
-          navigate(`/report/${data.analysis_id}`);
-        }
-        if (payload.message.startsWith("Analysis failed") || payload.message === "Analysis cancelled.") {
-          setRunning(false);
-          setCurrentAnalysisId(null);
+        const payload = JSON.parse(event.data) as ProgressPayload;
+        if (payload.message) appendMessage(payload.message);
+        const status = payload.status;
+        if (isSuccessfulAnalysisStatus(status) || payload.event === "completed") {
+          finishAnalysis(data.analysis_id);
+          navigateToReportOnce(data.analysis_id);
+        } else if (isFailureAnalysisStatus(status) || payload.event === "failed" || payload.event === "cancelled") {
+          if (payload.details?.reason) appendMessage(payload.details.reason);
+          finishAnalysis(data.analysis_id);
         }
       };
+
+      socket.onclose = () => {
+        if (socketRef.current === socket) socketRef.current = null;
+        if (activeAnalysisIdRef.current === data.analysis_id && !navigatedAnalysisIdsRef.current.has(data.analysis_id)) {
+          appendMessage("Connection interrupted; checking analysis status...");
+          startPolling(data.analysis_id, 500);
+        }
+      };
+
       socket.onerror = () => {
-        setError("Progress connection failed.");
-        setRunning(false);
+        // The close handler switches to polling.
       };
     } catch (err) {
-      setRunning(false);
-      setCurrentAnalysisId(null);
+      finishAnalysis();
       setError(err instanceof Error ? err.message : "Analysis could not start.");
     }
   }
@@ -166,7 +268,12 @@ export default function Dashboard() {
   async function cancelAnalysis() {
     if (!currentAnalysisId) return;
     try {
-      await apiFetch(`/api/analyses/${currentAnalysisId}/cancel`, { method: "POST" });
+      const data = await apiFetch<AnalysisLookupResponse>(`/api/analyses/${currentAnalysisId}/cancel`, { method: "POST" });
+      if (isTerminalAnalysisStatus(data.analysis.status)) {
+        const reason = data.analysis.analysis_result?.reason ?? data.analysis.analysis_result?.error ?? `Analysis ${data.analysis.status}.`;
+        appendMessage(reason);
+        finishAnalysis(currentAnalysisId);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to cancel analysis.");
     }
@@ -295,11 +402,11 @@ export default function Dashboard() {
               <div className="rounded-lg border border-amber-400/30 bg-amber-500/10 p-4 text-sm text-amber-100">
                 <p className="font-medium text-white">Important notes</p>
                 <ul className="mt-2 list-disc space-y-1 pl-5 text-amber-100/90">
-                  <li><code className="text-amber-200">s3:GetLifecycleConfiguration</code> — verifies whether S3 buckets have lifecycle policies</li>
-                  <li><code className="text-amber-200">ce:GetCostAndUsage</code> — retrieves Cost Explorer billing data (optional)</li>
+                  <li><code className="text-amber-200">s3:GetLifecycleConfiguration</code> - verifies whether S3 buckets have lifecycle policies</li>
+                  <li><code className="text-amber-200">ce:GetCostAndUsage</code> - retrieves Cost Explorer billing data (optional)</li>
                   <li>Missing optional permissions produce warnings, not failed scans</li>
                   <li>BudgetBeagle is read-only and never modifies AWS resources</li>
-                  <li>Attach this policy manually — BudgetBeagle does not modify IAM</li>
+                  <li>Attach this policy manually - BudgetBeagle does not modify IAM</li>
                 </ul>
               </div>
             </div>
@@ -347,8 +454,8 @@ function AwsConnectionPanel({ status, onViewPolicy }: { status: AwsStatus; onVie
             <p className="mt-0.5 text-sm text-slate-300">
               {isConnected && (
                 <>
-                  Account: {status.account_id_masked ?? "Unknown"} · Region: {status.default_region}
-                  {isLimited ? " · Permissions: Limited" : " · Permissions: Full"}
+                  Account: {status.account_id_masked ?? "Unknown"}  -  Region: {status.default_region}
+                  {isLimited ? "  -  Permissions: Limited" : "  -  Permissions: Full"}
                 </>
               )}
               {!isConnected && "Configure AWS credentials to start scanning."}

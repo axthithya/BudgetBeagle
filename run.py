@@ -331,7 +331,29 @@ def start_app(python: Path, node: str) -> int:
         stop_processes(processes)
 
 
+def launcher_check() -> int:
+    check_python_version()
+    node, npm = check_node_version()
+    env_path = BACKEND_DIR / ".env"
+    example_path = BACKEND_DIR / ".env.example"
+    env_values = parse_env_file(env_path if env_path.exists() else example_path)
+    backend_port = configured_port("BUDGETBEAGLE_BACKEND_PORT", DEFAULT_BACKEND_PORT, env_values)
+    frontend_port = configured_port("BUDGETBEAGLE_FRONTEND_PORT", DEFAULT_FRONTEND_PORT, env_values)
+    node_version = subprocess.run([node, "-v"], capture_output=True, text=True, check=False).stdout.strip()
+    npm_version = subprocess.run([npm, "-v"], capture_output=True, text=True, check=False).stdout.strip()
+    print("BudgetBeagle launcher smoke check passed.")
+    print(f"Python: {sys.version.split()[0]}")
+    print(f"Node: {node_version}")
+    print(f"npm: {npm_version}")
+    print(f"Backend env source: {'backend/.env' if env_path.exists() else 'backend/.env.example'}")
+    print(f"Backend port: {backend_port}")
+    print(f"Frontend port: {frontend_port}")
+    return 0
+
+
 def main() -> int:
+    if "--check" in sys.argv or "--smoke" in sys.argv:
+        return launcher_check()
     check_python_version()
     node, npm = check_node_version()
     backend_python = setup_backend()

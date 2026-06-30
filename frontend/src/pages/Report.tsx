@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import {
   AlertTriangle,
   BarChart3,
@@ -23,14 +23,13 @@ import {
   Terminal,
 } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
-import { AnalysisRecord, AnalysisResult, BillingAmount, BillingContext, Issue, ScanWarning, apiFetch } from "../lib/api";
-import { formatMonthlySavings, formatStatus, formatUSD, formatMoney, formatDateTime, formatShortDate, formatDuration, humanLabel, humanizeMetricName, formatBytes } from "../lib/format";
+import { AnalysisRecord, AnalysisResult, BillingAmount, BillingContext, Issue, ReportConfidence, ScanWarning, ServiceCoverage, apiFetch, apiFetchBlob } from "../lib/api";
+import { isTerminalAnalysisStatus } from "../lib/analysisStatus";
+import { formatMonthlySavings, formatStatus, formatMoney, formatDateTime, formatShortDate, formatDuration, humanLabel, humanizeMetricName, formatBytes } from "../lib/format";
 
 function isFullResult(value: AnalysisRecord["analysis_result"]): value is AnalysisResult {
-  return Boolean((value as AnalysisResult).analysis);
+  return Boolean((value as AnalysisResult).report);
 }
-
-const TERMINAL_STATUSES = new Set(["completed", "completed_with_warnings", "failed", "cancelled", "interrupted"]);
 type TabKey = "overview" | "billing" | "findings" | "resources" | "commands" | "warnings";
 
 const tabs: { key: TabKey; label: string; icon: typeof BarChart3 }[] = [
@@ -42,7 +41,7 @@ const tabs: { key: TabKey; label: string; icon: typeof BarChart3 }[] = [
   { key: "warnings", label: "Warnings", icon: AlertTriangle },
 ];
 
-// ── Schema version ─────────────────────────────────────────────────────
+// -- Schema version -----------------------------------------------------
 const SCHEMA_VERSION = "2.0";
 
 export default function Report() {
@@ -51,6 +50,26 @@ export default function Report() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
+  const [showZeroBilling, setShowZeroBilling] = useState(false);
+  const tabRefs = useRef<Partial<Record<TabKey, HTMLButtonElement | null>>>({});
+
+  function selectTab(tab: TabKey) {
+    setActiveTab(tab);
+    window.requestAnimationFrame(() => tabRefs.current[tab]?.focus());
+  }
+
+  function handleTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, key: TabKey) {
+    const currentIndex = tabs.findIndex((tab) => tab.key === key);
+    const lastIndex = tabs.length - 1;
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowRight") nextIndex = currentIndex === lastIndex ? 0 : currentIndex + 1;
+    else if (event.key === "ArrowLeft") nextIndex = currentIndex === 0 ? lastIndex : currentIndex - 1;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = lastIndex;
+    else return;
+    event.preventDefault();
+    selectTab(tabs[nextIndex].key);
+  }
 
   useEffect(() => {
     let active = true;
@@ -62,7 +81,7 @@ export default function Report() {
         const data = await apiFetch<{ analysis: AnalysisRecord }>(`/api/analyses/${analysisId}`);
         if (!active) return;
         setRecord(data.analysis);
-        if (!TERMINAL_STATUSES.has(data.analysis.status)) {
+        if (!isTerminalAnalysisStatus(data.analysis.status)) {
           timer = window.setTimeout(load, 1800);
         }
       } catch (err) {
@@ -78,13 +97,15 @@ export default function Report() {
   }, [analysisId]);
 
   const result = useMemo(() => (record && isFullResult(record.analysis_result) ? record.analysis_result : null), [record]);
-  const findings = result?.analysis.findings ?? result?.analysis.issues ?? [];
-  const warnings = result?.analysis.warnings ?? result?.scan.warnings ?? [];
-  const billing = result?.analysis.billing ?? result?.scan.billing ?? {};
-  const metrics = result?.analysis.metrics ?? {};
-  const confidence = result?.analysis.confidence;
-  const resources = result?.scan.resources ?? [];
-  const commands = findings.filter((issue) => issue.command?.valid && issue.command.text);
+  const report = result?.report;
+  const legacyScan = result?.scan;
+  const findings = result?.findings ?? [];
+  const warnings = result?.warnings ?? legacyScan?.warnings ?? [];
+  const billing = result?.billing ?? legacyScan?.billing ?? {};
+  const metrics = result?.metrics ?? {};
+  const confidence = result?.scan_confidence;
+  const resources = result?.resources ?? legacyScan?.resources ?? [];
+  const commands = findings.filter((issue: Issue) => issue.command?.valid && issue.command.text);
 
   async function copy(issue: Issue) {
     const command = issue.command?.valid ? issue.command.text : issue.fix_command;
@@ -119,35 +140,19 @@ export default function Report() {
     URL.revokeObjectURL(url);
   }
 
-  function downloadCSV() {
-    if (!result || !record) return;
-    const lines: string[] = [];
-    lines.push("Section,Service,ID,Type,State,Detail,Value");
-    resources.forEach((r) => {
-      const item = normalizeResource(r);
-      lines.push(csvRow(["Resource", item.service, item.id, item.type, item.state, "", ""]));
-    });
-    findings.forEach((f) => {
-      lines.push(csvRow(["Finding", f.service ?? "", f.resource_id, f.issue_type, f.category ?? "", f.severity, f.estimated_monthly_savings_display ?? ""]));
-    });
-    warnings.forEach((w) => {
-      lines.push(csvRow(["Warning", w.service, w.resource_id ?? "", w.code ?? "", "", w.message, ""]));
-    });
-    const serviceCosts = billing.service_costs_ytd ?? [];
-    serviceCosts.forEach((s) => {
-      lines.push(csvRow(["Billing-Service", s.name ?? s.label ?? "", "", "", "", "", s.display ?? ""]));
-    });
-    const regionCosts = billing.region_costs_ytd ?? [];
-    regionCosts.forEach((r) => {
-      lines.push(csvRow(["Billing-Region", r.name ?? r.label ?? "", "", "", "", "", r.display ?? ""]));
-    });
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `budgetbeagle-report-${record.id}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  async function downloadCSV() {
+    if (!record) return;
+    try {
+      const blob = await apiFetchBlob(`/api/analyses/${record.id}/export/zip`);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `budgetbeagle_export_${record.id}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to download export.");
+    }
   }
 
   if (error) {
@@ -169,7 +174,7 @@ export default function Report() {
     );
   }
 
-  if (!TERMINAL_STATUSES.has(record.status) || !result) {
+  if (!isTerminalAnalysisStatus(record.status) || !result || !report) {
     return <div className="flex items-center gap-3 text-slate-300" aria-live="polite"><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Analysis running</div>;
   }
 
@@ -177,21 +182,24 @@ export default function Report() {
   const period = billing.period?.label ?? "Current period";
   const scanDate = record.created_at ? formatDateTime(record.created_at) : "Queued";
 
-  // §4: Semantic counters
-  const confirmedIssues = result.analysis.confirmed_issues ?? 0;
-  const recommendations = result.analysis.recommendations ?? 0;
-  const observations = result.analysis.observations ?? 0;
+  const confirmedIssues = report.confirmed_issues ?? 0;
+  const recommendations = report.recommendations ?? 0;
+  const observations = report.observations ?? 0;
+  const actionableCount = report.actionable_findings ?? confirmedIssues + recommendations;
 
-  // §4: Pricing coverage — only count actionable findings
-  const actionableFindings = findings.filter((f) => (f.category ?? "").toLowerCase() !== "observation");
+  // Pricing coverage - only count actionable findings
+  const actionableFindings = findings.filter((f) => canonicalCategory(f.category) !== "observation");
   const pricedCount = actionableFindings.filter((f) => f.pricing_status === "verified" || f.pricing_source).length;
   const pricingLabel = actionableFindings.length === 0 ? "Not applicable" : `${pricedCount}/${actionableFindings.length} priced`;
   const pricingDetail = actionableFindings.length === 0
     ? "No actionable findings require pricing data."
     : "Verified price sources only contribute numeric savings.";
 
-  // §11: Service scan coverage
-  const coverage = buildCoverage(resources, warnings);
+  // Phase 1.11: Service scan coverage
+  const coverage = normalizeCoverage(result.service_coverage, resources, warnings);
+  const coverageStats = getCoverageSummary(coverage, resources.length, report.service_coverage_summary);
+  const findingConfidence = summarizeFindingConfidence(findings);
+  const savingsConfidence = report.savings_confidence;
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6 overflow-hidden">
@@ -200,7 +208,7 @@ export default function Report() {
           <div className="min-w-0">
             <h1 className="text-2xl font-semibold tracking-normal text-white sm:text-3xl">BudgetBeagle Report</h1>
             <p className="mt-2 max-w-5xl break-words text-sm leading-6 text-slate-400">
-              Region: {regionLabel} · Account {billing.account_id ?? result.scan.account_id ?? "Unknown"} · {period} · Scanned {scanDate}
+              Region: {regionLabel}  -  Account {billing.account_id ?? result.scan.account_id ?? "Unknown"}  -  {period}  -  Scanned {scanDate}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -240,14 +248,17 @@ export default function Report() {
           </div>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
-          <Metric label="Account Total" sublabel="YTD global" value={metrics.account_total_ytd_display ?? formatMoney(billing.account_total_ytd_usd)} />
-          <Metric label="Regional Spend" sublabel={record.region} value={metrics.selected_region_ytd_display ?? formatMoney(billing.selected_region_ytd_usd)} />
-          <Metric label="Resources" sublabel="Scanned" value={String(record.resources_scanned)} />
-          <Metric label="Confirmed Issues" sublabel="Actionable findings" value={String(confirmedIssues + recommendations)} tone={confirmedIssues + recommendations > 0 ? "rose" : "slate"} />
-          <Metric label="Report Confidence" sublabel={confidence?.label ?? metrics.confidence_label ?? "Derived"} value={`${confidence?.score ?? metrics.confidence_score ?? "--"}%`} />
-          <Metric label="Monthly Savings" sublabel="Evidence-backed" value={metrics.monthly_savings_display ?? result.analysis.estimated_monthly_savings_display ?? formatMonthlySavings(record.estimated_savings)} tone="green" />
-          <Metric label="Yearly Savings" sublabel="Annualized" value={metrics.yearly_savings_display ?? result.analysis.yearly_savings?.display ?? "Not enough data"} tone="green" />
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+          <Metric label="Account Total" sublabel="YTD global" value={formatMoney(metrics.account_total_ytd_display ?? billing.account_total_ytd_usd)} />
+          <Metric label="Regional Spend" sublabel={record.region} value={formatMoney(metrics.selected_region_ytd_display ?? billing.selected_region_ytd_usd)} />
+          <Metric label="Resources" sublabel="Discovered" value={String(coverageStats.resourcesDiscovered)} />
+          <Metric label="Confirmed Issues" sublabel="confirmed_issue only" value={String(confirmedIssues)} tone={confirmedIssues > 0 ? "rose" : "slate"} />
+          <Metric label="Recommendations" sublabel="Actionable review" value={String(recommendations)} tone={recommendations > 0 ? "rose" : "slate"} />
+          <Metric label="Observations" sublabel="Not actionable" value={String(observations)} />
+          <Metric label="Scan Confidence" sublabel={confidence?.label ?? metrics.confidence_label ?? "Derived"} value={confidence?.score != null ? `${confidence.score}%` : "Not applicable"} />
+          <Metric label="Finding Confidence" sublabel={findingConfidence.detail} value={findingConfidence.value} />
+          <Metric label="Savings Confidence" sublabel="Numeric savings only" value={formatConfidenceValue(savingsConfidence)} />
+          <Metric label="Monthly Savings" sublabel="Evidence-backed" value={formatMoney(metrics.monthly_savings_display ?? report.estimated_monthly_savings_display ?? formatMonthlySavings(record.estimated_savings))} tone="green" />
         </div>
       </header>
 
@@ -263,7 +274,10 @@ export default function Report() {
               id={`tab-${tab.key}`}
               aria-selected={selected}
               aria-controls={`panel-${tab.key}`}
+              ref={(node) => { tabRefs.current[tab.key] = node; }}
+              tabIndex={selected ? 0 : -1}
               onClick={() => setActiveTab(tab.key)}
+              onKeyDown={(event) => handleTabKeyDown(event, tab.key)}
               className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-md px-3 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-cloud-cyan ${
                 selected ? "bg-cloud-cyan text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
               }`}
@@ -275,11 +289,11 @@ export default function Report() {
         })}
       </nav>
 
-      <div role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`}>
+      <div role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`} tabIndex={0}>
         {activeTab === "overview" && (
-          <OverviewTab result={result} billing={billing} warnings={warnings} confidence={confidence} findings={findings} coverage={coverage} confirmedIssues={confirmedIssues} recommendations={recommendations} observations={observations} pricingLabel={pricingLabel} pricingDetail={pricingDetail} />
+          <OverviewTab result={result} billing={billing} warnings={warnings} confidence={confidence} savingsConfidence={savingsConfidence} findingConfidence={findingConfidence} coverage={coverage} coverageStats={coverageStats} confirmedIssues={confirmedIssues} recommendations={recommendations} observations={observations} actionableCount={actionableCount} pricingLabel={pricingLabel} pricingDetail={pricingDetail} />
         )}
-        {activeTab === "billing" && <BillingTab billing={billing} />}
+        {activeTab === "billing" && <BillingTab billing={billing} showZero={showZeroBilling} onShowZeroChange={setShowZeroBilling} />}
         {activeTab === "findings" && <FindingsTab findings={findings} observations={observations} copied={copied} onCopy={copy} />}
         {activeTab === "resources" && <ResourcesTab resources={resources} copied={copied} onCopy={copyText} />}
         {activeTab === "commands" && <CommandsTab commands={commands} copied={copied} onCopy={copy} />}
@@ -289,23 +303,27 @@ export default function Report() {
   );
 }
 
-// ── Overview Tab ────────────────────────────────────────────────────────
+// -- Overview Tab --------------------------------------------------------
 
 type OverviewProps = {
   result: AnalysisResult;
   billing: BillingContext;
   warnings: ScanWarning[];
-  confidence?: { score: number; label: string; basis?: string; factors?: { name: string; effect: string; reason: string }[] };
-  findings: Issue[];
+  confidence?: ReportConfidence;
+  savingsConfidence?: ReportConfidence;
+  findingConfidence: FindingConfidenceSummary;
   coverage: CoverageEntry[];
+  coverageStats: CoverageStats;
   confirmedIssues: number;
   recommendations: number;
   observations: number;
+  actionableCount: number;
   pricingLabel: string;
   pricingDetail: string;
 };
 
-function OverviewTab({ result, billing, warnings, confidence, coverage, confirmedIssues, recommendations, observations, pricingLabel, pricingDetail }: OverviewProps) {
+function OverviewTab({ result, billing, warnings, confidence, savingsConfidence, findingConfidence, coverage, coverageStats, confirmedIssues, recommendations, observations, actionableCount, pricingLabel, pricingDetail }: OverviewProps) {
+  const summaryText = result.report.summary ?? "Report completed.";
   return (
     <div className="space-y-4">
       {(billing.insights ?? []).map((insight) => (
@@ -327,50 +345,41 @@ function OverviewTab({ result, billing, warnings, confidence, coverage, confirme
           <Layers className="h-5 w-5 text-cloud-cyan" aria-hidden="true" />
           <h2 className="text-lg font-semibold">Summary</h2>
         </div>
-        <p className="mt-3 text-sm leading-7 text-slate-300">{result.analysis.summary}</p>
-        {confidence && <ConfidenceSection confidence={confidence} />}
+        <p className="mt-3 text-sm leading-7 text-slate-300">{summaryText}</p>
+        <ConfidenceSection scanConfidence={confidence} findingConfidence={findingConfidence} savingsConfidence={savingsConfidence} />
       </section>
 
       <section className="grid gap-4 lg:grid-cols-3">
         <MiniPanel
           title="Findings Breakdown"
           value={`${confirmedIssues} confirmed issue${confirmedIssues !== 1 ? "s" : ""}`}
-          detail={`${recommendations} recommendation${recommendations !== 1 ? "s" : ""} · ${observations} observation${observations !== 1 ? "s" : ""}`}
+          detail={`${recommendations} recommendation${recommendations !== 1 ? "s" : ""} - ${observations} observation${observations !== 1 ? "s" : ""} - ${actionableCount} actionable`}
         />
         <MiniPanel title="Pricing Coverage" value={pricingLabel} detail={pricingDetail} />
         <MiniPanel
           title="Service Coverage"
-          value={`${coverage.filter((c) => c.status === "completed" || c.status === "completed_with_warnings").length}/${coverage.length} services`}
-          detail={coverage.map((c) => `${c.service}: ${c.label}`).join(" · ")}
+          value={`Services scanned: ${coverageStats.servicesScanned}/${coverageStats.totalServices}`}
+          detail={`Services containing resources: ${coverageStats.servicesContainingResources}/${coverageStats.totalServices} - Resources discovered: ${coverageStats.resourcesDiscovered}`}
         />
       </section>
 
-      {/* §11: Scan coverage details */}
+      {/* Phase 1.11: Scan coverage details */}
       <CoverageSection coverage={coverage} />
     </div>
   );
 }
 
-// ── Billing Tab ────────────────────────────────────────────────────────
+// -- Billing Tab --------------------------------------------------------
 
-function BillingTab({ billing }: { billing: BillingContext }) {
-  const [showZero, setShowZero] = useState(false);
+function BillingTab({ billing, showZero, onShowZeroChange }: { billing: BillingContext; showZero: boolean; onShowZeroChange: (value: boolean) => void }) {
   const accountMonths = billing.monthly_account_costs ?? [];
-  const allServiceCosts = billing.service_costs_ytd ?? [];
-  const allRegionCosts = billing.region_costs_ytd ?? [];
-
-  // Parse numeric value from display string
-  const parseAmount = (row: BillingAmount) => {
-    const raw = row.amount_usd ?? 0;
-    if (typeof raw === "number") return raw;
-    const match = (row.display ?? "").replace(/[^0-9.-]/g, "");
-    return match ? Number(match) : 0;
-  };
-
-  const nonZeroServices = allServiceCosts.filter((r) => Math.abs(parseAmount(r)) >= 0.005);
-  const nonZeroRegions = allRegionCosts.filter((r) => Math.abs(parseAmount(r)) >= 0.005);
-  const serviceCosts = (showZero ? allServiceCosts : nonZeroServices).sort((a, b) => parseAmount(b) - parseAmount(a));
-  const regionCosts = (showZero ? allRegionCosts : nonZeroRegions).sort((a, b) => parseAmount(b) - parseAmount(a));
+  const allServiceCosts = normalizeBillingRows(billing.service_costs_ytd ?? []);
+  const allRegionCosts = normalizeBillingRows(billing.region_costs_ytd ?? []);
+  const hasZeroRows = [...allServiceCosts, ...allRegionCosts].some(isZeroAmount);
+  const nonZeroServices = allServiceCosts.filter((row) => !isZeroAmount(row));
+  const nonZeroRegions = allRegionCosts.filter((row) => !isZeroAmount(row));
+  const serviceCosts = showZero ? allServiceCosts : nonZeroServices;
+  const regionCosts = showZero ? allRegionCosts : nonZeroRegions;
 
   if (billing.status !== "available") {
     return (
@@ -390,20 +399,25 @@ function BillingTab({ billing }: { billing: BillingContext }) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold text-white">Global Billing</h2>
-            <p className="mt-1 text-sm text-slate-400">{billing.period?.label ?? "YTD"} · {billing.source ?? "AWS Cost Explorer"}</p>
+            <p className="mt-1 text-sm text-slate-400">{billing.period?.label ?? "YTD"} - {billing.source ?? "AWS Cost Explorer"}</p>
           </div>
-          {!allZero && (
+          {hasZeroRows && (
             <button
               type="button"
-              onClick={() => setShowZero(!showZero)}
+              onClick={() => onShowZeroChange(!showZero)}
               className="inline-flex h-9 items-center gap-2 rounded-md border border-cloud-line px-3 text-sm text-slate-300 hover:border-cloud-cyan focus:outline-none focus:ring-2 focus:ring-cloud-cyan"
               aria-pressed={showZero}
             >
               {showZero ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
-              {showZero ? "Hide zero-cost" : "Show zero-cost services"}
+              {showZero ? "Hide zero-cost services" : "Show zero-cost services"}
             </button>
           )}
         </div>
+        {hasZeroRows && (
+          <p className="mt-3 max-w-4xl text-sm leading-6 text-slate-400">
+            Zero-cost entries can appear because AWS Cost Explorer reports service or regional usage dimensions even when the rounded billed amount is $0.00.
+          </p>
+        )}
         <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           {accountMonths.map((month) => <MonthCard key={`${month.start}-${month.label}`} month={month} />)}
         </div>
@@ -413,13 +427,7 @@ function BillingTab({ billing }: { billing: BillingContext }) {
         <section className="rounded-lg border border-cloud-line bg-cloud-panel p-5">
           <h2 className="font-semibold text-white">No billable usage detected for this period.</h2>
           <p className="mt-2 text-sm text-slate-400">All scanned services and regions show $0.00 spend. This does not mean resources were not scanned.</p>
-          <button
-            type="button"
-            onClick={() => setShowZero(true)}
-            className="mt-3 text-sm font-medium text-cloud-cyan hover:text-teal-200 focus:outline-none focus:ring-2 focus:ring-cloud-cyan"
-          >
-            Show zero-cost services
-          </button>
+
         </section>
       ) : (
         <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -431,7 +439,7 @@ function BillingTab({ billing }: { billing: BillingContext }) {
   );
 }
 
-// ── Findings Tab ───────────────────────────────────────────────────────
+// Findings Tab -------------------------------------------------------
 
 function FindingsTab({ findings, observations, copied, onCopy }: { findings: Issue[]; observations: number; copied: string | null; onCopy: (issue: Issue) => void }) {
   if (!findings.length) {
@@ -456,7 +464,7 @@ function FindingsTab({ findings, observations, copied, onCopy }: { findings: Iss
   );
 }
 
-// ── Resources Tab ──────────────────────────────────────────────────────
+// -- Resources Tab ------------------------------------------------------
 
 function ResourcesTab({ resources, copied, onCopy }: { resources: unknown[]; copied: string | null; onCopy: (text: string, id: string) => void }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -540,7 +548,7 @@ function ResourcesTab({ resources, copied, onCopy }: { resources: unknown[]; cop
                 <div className="min-w-0">
                   <p className="font-medium text-white">{item.service}</p>
                   <div className="mt-1 flex items-center gap-2">
-                    <p className="truncate text-sm text-slate-400">{item.id}</p>
+                    <p className="break-all text-sm text-slate-400">{item.id}</p>
                     <button
                       type="button"
                       onClick={() => onCopy(item.id, `res-m-${item.id}`)}
@@ -580,7 +588,7 @@ function ResourcesTab({ resources, copied, onCopy }: { resources: unknown[]; cop
   );
 }
 
-// ── Commands Tab ───────────────────────────────────────────────────────
+// -- Commands Tab -------------------------------------------------------
 
 function CommandsTab({ commands, copied, onCopy }: { commands: Issue[]; copied: string | null; onCopy: (issue: Issue) => void }) {
   if (!commands.length) {
@@ -609,7 +617,7 @@ function CommandsTab({ commands, copied, onCopy }: { commands: Issue[]; copied: 
   );
 }
 
-// ── Warnings Tab ───────────────────────────────────────────────────────
+// -- Warnings Tab -------------------------------------------------------
 
 function WarningsTab({ warnings, copied, onCopy }: { warnings: ScanWarning[]; copied: string | null; onCopy: (text: string, id: string) => void }) {
   if (!warnings.length) {
@@ -628,20 +636,24 @@ function WarningsTab({ warnings, copied, onCopy }: { warnings: ScanWarning[]; co
   );
 }
 
-// ── Finding Card ───────────────────────────────────────────────────────
+// -- Finding Card -------------------------------------------------------
 
 function FindingCard({ issue, copied, onCopy }: { issue: Issue; copied: string | null; onCopy: (issue: Issue) => void }) {
   const savings = issue.estimated_monthly_savings_display ?? formatMonthlySavings(issue.estimated_monthly_savings);
   const maxAvoidable = issue.maximum_monthly_avoidable_cost_display;
+  const findingConfidenceScore = issue.finding_confidence?.score ?? issue.confidence_score ?? confidencePercent(issue.confidence);
+  const findingConfidenceLabel = issue.finding_confidence?.label ?? "Finding";
+  const savingsConfidence = issue.savings_confidence;
 
   return (
     <article className="rounded-lg border border-cloud-line bg-cloud-panel p-5">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap gap-2">
-            <Badge label={issue.category ?? "Recommendation"} tone="slate" />
+            <Badge label={categoryLabel(issue.category)} tone="slate" />
             <Badge label={issue.severity} tone={severityTone(issue.severity)} />
-            <Badge label={`${issue.confidence_score ?? confidencePercent(issue.confidence)}% confidence`} tone="green" />
+            <Badge label={`${findingConfidenceLabel} ${findingConfidenceScore}% finding confidence`} tone="green" />
+            {savingsConfidence && <Badge label={`${savingsConfidence.label} savings confidence`} tone="cyan" />}
           </div>
           <h2 className="mt-3 text-lg font-semibold text-white">{issue.issue_type}</h2>
           <p className="mt-1 break-all text-sm text-slate-400">{issue.service ?? "AWS"} / {issue.resource_id}</p>
@@ -650,8 +662,8 @@ function FindingCard({ issue, copied, onCopy }: { issue: Issue; copied: string |
           <p className="text-sm text-slate-500">Savings</p>
           <p className="text-lg font-semibold text-cloud-green">{savings}</p>
           {savings === "Not enough data" && (
-            <p className="mt-1 max-w-[200px] text-xs text-slate-500" title="No evidence-backed action with verified pricing is currently available.">
-              No verified pricing available
+            <p className="mt-1 max-w-[220px] text-xs text-slate-500">
+              Savings confidence not applicable without numeric savings.
             </p>
           )}
         </div>
@@ -671,7 +683,7 @@ function FindingCard({ issue, copied, onCopy }: { issue: Issue; copied: string |
   );
 }
 
-// ── Warning Summary + Card ─────────────────────────────────────────────
+// -- Warning Summary + Card ---------------------------------------------
 
 function WarningSummary({ warnings }: { warnings: ScanWarning[] }) {
   const visible = warnings.slice(0, 3);
@@ -685,7 +697,7 @@ function WarningSummary({ warnings }: { warnings: ScanWarning[] }) {
         {visible.map((warning, index) => (
           <p key={`${warning.service}-${warning.resource_id ?? index}-${warning.code ?? index}`} className="text-sm">
             <span className="font-medium text-white">{warning.title ?? warning.service}</span>
-            {warning.resource_id ? ` — ${warning.resource_id}` : ""}
+            {warning.resource_id ? ` - ${warning.resource_id}` : ""}
           </p>
         ))}
         {warnings.length > visible.length && (
@@ -715,13 +727,13 @@ function WarningCard({ warning, copied, onCopy }: { warning: ScanWarning; copied
       {warning.resource_id && (
         <div className="mt-2 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
           <span className="text-amber-200/70">Resource:</span>
-          <span className="text-white">{warning.resource_id}</span>
+          <span className="break-all text-white">{warning.resource_id}</span>
         </div>
       )}
       {warning.permission && (
         <div className="mt-1 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
           <span className="text-amber-200/70">Missing permission:</span>
-          <code className="text-amber-200">{warning.permission}</code>
+          <code className="break-all text-amber-200">{warning.permission}</code>
         </div>
       )}
       <div className="mt-1 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
@@ -772,78 +784,111 @@ function WarningCard({ warning, copied, onCopy }: { warning: ScanWarning; copied
   );
 }
 
-// ── Confidence Section ─────────────────────────────────────────────────
+// -- Confidence Section -------------------------------------------------
 
-function ConfidenceSection({ confidence }: { confidence: { score: number; label: string; basis?: string; factors?: { name: string; effect: string; reason: string }[] } }) {
+function ConfidenceSection({ scanConfidence, findingConfidence, savingsConfidence }: { scanConfidence?: ReportConfidence; findingConfidence: FindingConfidenceSummary; savingsConfidence?: ReportConfidence }) {
   const [open, setOpen] = useState(false);
-  const factors = confidence.factors ?? [];
+  const factors = scanConfidence?.factors ?? [];
   return (
-    <div className="mt-3">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white focus:outline-none focus:ring-2 focus:ring-cloud-cyan"
-        aria-expanded={open}
-      >
-        <Info className="h-4 w-4" aria-hidden="true" />
-        Report data confidence: {confidence.score}% — {confidence.label}
-        {open ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-      </button>
+    <div className="mt-3 space-y-3">
+      <div className="grid gap-3 md:grid-cols-3">
+        <Detail title="Scan confidence"><p>{scanConfidence?.score != null ? `${scanConfidence.score}% - ${scanConfidence.label}` : "Not applicable"}</p></Detail>
+        <Detail title="Finding confidence"><p>{findingConfidence.value}{findingConfidence.detail !== "Not applicable" ? ` - ${findingConfidence.detail}` : ""}</p></Detail>
+        <Detail title="Savings confidence"><p>{formatConfidenceValue(savingsConfidence)}</p></Detail>
+      </div>
+      {scanConfidence && (
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white focus:outline-none focus:ring-2 focus:ring-cloud-cyan"
+          aria-expanded={open}
+        >
+          <Info className="h-4 w-4" aria-hidden="true" />
+          Scan confidence details
+          {open ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+        </button>
+      )}
       {open && factors.length > 0 && (
-        <div className="mt-3 space-y-2 rounded-lg border border-cloud-line bg-cloud-ink p-4">
-          <p className="text-xs font-semibold uppercase text-slate-500">Confidence factors</p>
+        <div className="space-y-2 rounded-lg border border-cloud-line bg-cloud-ink p-4">
+          <p className="text-xs font-semibold uppercase text-slate-500">Scan confidence factors</p>
           {factors.map((factor, i) => (
             <div key={i} className="flex items-start gap-2 text-sm">
               <span className={`mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full ${factor.effect === "positive" ? "bg-emerald-400" : "bg-amber-400"}`} aria-hidden="true" />
               <div>
                 <span className="font-medium text-slate-200">{factor.name}</span>
-                <span className="text-slate-400"> — {factor.reason}</span>
+                <span className="text-slate-400"> - {factor.reason}</span>
               </div>
             </div>
           ))}
-          {confidence.basis && <p className="mt-2 text-xs text-slate-500">{confidence.basis}</p>}
+          {scanConfidence?.basis && <p className="mt-2 text-xs text-slate-500">{scanConfidence.basis}</p>}
         </div>
       )}
     </div>
   );
 }
 
-// ── Coverage Section ───────────────────────────────────────────────────
+// Coverage Section ---------------------------------------------------
 
 type CoverageEntry = {
   service: string;
   status: "completed" | "completed_with_warnings" | "no_resources" | "skipped" | "failed";
   count: number;
   label: string;
+  scanned?: boolean;
+  has_resources?: boolean;
 };
+
+type CoverageStats = {
+  totalServices: number;
+  servicesScanned: number;
+  servicesContainingResources: number;
+  resourcesDiscovered: number;
+};
+
+type FindingConfidenceSummary = {
+  value: string;
+  detail: string;
+  score?: number;
+};
+
+function normalizeCoverage(coverage: ServiceCoverage[] | undefined, resources: unknown[], warnings: ScanWarning[]): CoverageEntry[] {
+  if (!coverage?.length) return buildCoverage(resources, warnings);
+  return coverage.map((entry) => ({
+    service: entry.service,
+    status: entry.status as CoverageEntry["status"],
+    count: entry.count,
+    label: entry.label ?? coverageLabel(entry.status, entry.count),
+    scanned: entry.scanned ?? isScannedCoverageStatus(entry.status),
+    has_resources: entry.has_resources ?? entry.count > 0,
+  }));
+}
+
+function coverageLabel(status: string, count: number): string {
+  if (status === "completed_with_warnings") return count > 0 ? `Completed with warnings - ${count} resource${count !== 1 ? "s" : ""}` : "Completed with warnings - no resources";
+  if (status === "completed") return `Completed - ${count} resource${count !== 1 ? "s" : ""}`;
+  if (status === "failed") return "Failed";
+  if (status === "skipped") return "Skipped";
+  return "Completed - no resources";
+}
 
 function buildCoverage(resources: unknown[], warnings: ScanWarning[]): CoverageEntry[] {
   const SUPPORTED_SERVICES = ["EC2", "EBS", "S3", "RDS", "Load Balancing", "Elastic IP", "NAT Gateway"];
   const countByService: Record<string, number> = {};
   resources.forEach((r) => {
     const item = (r && typeof r === "object" ? r : {}) as Record<string, unknown>;
-    const svc = String(item.service ?? "").toUpperCase();
-    countByService[svc] = (countByService[svc] ?? 0) + 1;
+    const svc = coverageServiceName(String(item.service ?? ""));
+    if (svc) countByService[svc] = (countByService[svc] ?? 0) + 1;
   });
-  const warnServices = new Set(warnings.map((w) => w.service.toUpperCase()));
+  const warnServices = new Set(warnings.map((w) => coverageServiceName(w.service)).filter(Boolean));
 
   return SUPPORTED_SERVICES.map((svc) => {
-    const key = svc.toUpperCase();
-    const count = countByService[key] ?? 0;
-    const hasWarning = warnServices.has(key);
+    const count = countByService[svc] ?? 0;
+    const hasWarning = warnServices.has(svc);
     let status: CoverageEntry["status"];
-    let label: string;
-    if (count > 0 && hasWarning) {
-      status = "completed_with_warnings";
-      label = `Completed with warnings — ${count} resource${count !== 1 ? "s" : ""}`;
-    } else if (count > 0) {
-      status = "completed";
-      label = `Completed — ${count} resource${count !== 1 ? "s" : ""}`;
-    } else {
-      status = "no_resources";
-      label = "Completed — no resources";
-    }
-    return { service: svc, status, count, label };
+    if (hasWarning) status = "completed_with_warnings";
+    else if (count > 0) status = "completed";
+    else status = "no_resources";
+    return { service: svc, status, count, label: coverageLabel(status, count), scanned: isScannedCoverageStatus(status), has_resources: count > 0 };
   });
 }
 
@@ -869,7 +914,7 @@ function CoverageSection({ coverage }: { coverage: CoverageEntry[] }) {
   );
 }
 
-// ── Shared Components ──────────────────────────────────────────────────
+// -- Shared Components --------------------------------------------------
 
 function Metric({ label, sublabel, value, tone = "slate" }: { label: string; sublabel: string; value: string; tone?: "slate" | "green" | "rose" }) {
   const color = tone === "green" ? "border-emerald-500/30 bg-emerald-500/10 text-cloud-green" : tone === "rose" ? "border-rose-500/30 bg-rose-500/10 text-rose-200" : "border-cloud-line bg-cloud-panel text-white";
@@ -905,7 +950,7 @@ function MonthCard({ month }: { month: BillingAmount }) {
   return (
     <div className="rounded-lg border border-cloud-line bg-cloud-ink p-3">
       <p className="text-xs text-slate-500">{month.label}</p>
-      <p className="mt-1 text-lg font-semibold text-white">{month.display}</p>
+      <p className="mt-1 text-lg font-semibold text-white">{formatMoney(month.display ?? month.amount_usd)}</p>
     </div>
   );
 }
@@ -927,8 +972,8 @@ function CostTable({ title, rows, empty }: { title: string; rows: BillingAmount[
             <tbody className="divide-y divide-cloud-line">
               {rows.map((row) => (
                 <tr key={row.name ?? row.label}>
-                  <td className="max-w-[420px] break-words px-4 py-3 font-medium text-slate-200">{(row.name ?? row.label ?? "").replace(/^$/, "Global / No Region")}</td>
-                  <td className="px-4 py-3 font-semibold text-rose-200">{row.display}</td>
+                  <td className="max-w-[420px] break-words px-4 py-3 font-medium text-slate-200">{billingName(row)}</td>
+                  <td className="px-4 py-3 font-semibold text-rose-200">{formatMoney(row.display ?? row.amount_usd)}</td>
                 </tr>
               ))}
             </tbody>
@@ -998,9 +1043,90 @@ function StatusBadge({ value }: { value: string }) {
   return <span className={`rounded-md border px-3 py-1 text-sm ${className}`}>{formatStatus(value)}</span>;
 }
 
-// ── Normalization & Formatting ─────────────────────────────────────────
+// -- Normalization & Formatting -----------------------------------------
 
 type MetricRow = { label: string; value: string };
+
+function canonicalCategory(value?: string): "confirmed_issue" | "recommendation" | "observation" {
+  const normalized = String(value ?? "recommendation").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["confirmed_issue", "confirmed_issues", "confirmedissue", "issue", "issues"].includes(normalized)) return "confirmed_issue";
+  if (["observation", "observations"].includes(normalized)) return "observation";
+  return "recommendation";
+}
+
+function categoryLabel(value?: string): string {
+  const category = canonicalCategory(value);
+  if (category === "confirmed_issue") return "Confirmed issue";
+  if (category === "observation") return "Observation";
+  return "Recommendation";
+}
+
+function formatConfidenceValue(confidence?: ReportConfidence): string {
+  if (!confidence || confidence.level === "not_applicable" || confidence.label === "Not applicable") return "Not applicable";
+  return confidence.score != null ? `${confidence.score}% - ${confidence.label}` : confidence.label;
+}
+
+function summarizeFindingConfidence(findings: Issue[]): FindingConfidenceSummary {
+  const scores = findings
+    .map((issue) => issue.finding_confidence?.score ?? issue.confidence_score ?? confidencePercent(issue.confidence))
+    .filter((score): score is number => Number.isFinite(score));
+  if (!scores.length) return { value: "Not applicable", detail: "Not applicable" };
+  const min = Math.min(...scores);
+  const max = Math.max(...scores);
+  const average = Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length);
+  const label = average >= 80 ? "High" : average >= 65 ? "Medium" : "Low";
+  if (min !== max) return { value: `${min}-${max}%`, detail: "range", score: average };
+  return { value: `${average}%`, detail: `${label} average`, score: average };
+}
+
+function getCoverageSummary(coverage: CoverageEntry[], resourceCount: number, summary?: { total_supported_services?: number; services_scanned?: number; services_containing_resources?: number; resources_discovered?: number }): CoverageStats {
+  const totalServices = summary?.total_supported_services ?? coverage.length;
+  const servicesScanned = summary?.services_scanned ?? coverage.filter((entry) => entry.scanned ?? isScannedCoverageStatus(entry.status)).length;
+  const servicesContainingResources = summary?.services_containing_resources ?? coverage.filter((entry) => (entry.scanned ?? isScannedCoverageStatus(entry.status)) && entry.count > 0).length;
+  const resourcesDiscovered = summary?.resources_discovered ?? (coverage.reduce((sum, entry) => sum + entry.count, 0) || resourceCount);
+  return { totalServices, servicesScanned, servicesContainingResources, resourcesDiscovered };
+}
+
+function isScannedCoverageStatus(status: string): boolean {
+  return ["completed", "completed_with_warnings", "no_resources"].includes(status);
+}
+
+function coverageServiceName(service: string): string {
+  const normalized = service.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (["ELB", "ELBV2", "CLASSICELB", "LOADBALANCING"].includes(normalized)) return "Load Balancing";
+  if (["ELASTICIP", "EIP"].includes(normalized)) return "Elastic IP";
+  if (normalized === "NATGATEWAY") return "NAT Gateway";
+  if (["EC2", "EBS", "S3", "RDS"].includes(normalized)) return normalized;
+  return "";
+}
+
+function normalizeBillingRows(rows: BillingAmount[]): BillingAmount[] {
+  return [...rows].sort((a, b) => {
+    const amountA = billingAmountValue(a);
+    const amountB = billingAmountValue(b);
+    const zeroA = Math.abs(amountA) < 0.005;
+    const zeroB = Math.abs(amountB) < 0.005;
+    if (zeroA !== zeroB) return zeroA ? 1 : -1;
+    if (!zeroA && amountA !== amountB) return amountB - amountA;
+    return billingName(a).localeCompare(billingName(b));
+  });
+}
+
+function billingAmountValue(row: BillingAmount): number {
+  const raw = row.amount_usd ?? row.display ?? 0;
+  const value = typeof raw === "number" ? raw : Number(String(raw).replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(value) ? value : 0;
+}
+
+function isZeroAmount(row: BillingAmount): boolean {
+  return Math.abs(billingAmountValue(row)) < 0.005;
+}
+
+function billingName(row: BillingAmount): string {
+  const name = row.name ?? row.label ?? "";
+  if (!name || name === "NoRegion") return "Global / No Region";
+  return name;
+}
 
 function normalizeResource(resource: unknown) {
   const item = (resource && typeof resource === "object" ? resource : {}) as Record<string, unknown>;
@@ -1030,9 +1156,9 @@ function normalizeResource(resource: unknown) {
     const size = metrics.size_gb;
     const attachCount = metrics.attachment_count ?? (metrics.unattached ? 0 : "?");
     const isGp3 = String(item.type_or_sku ?? "").toLowerCase() === "gp3";
-    const iopsLabel = isGp3 && (iops === 3000 || iops == null) ? "3,000 — included baseline" : iops != null ? String(iops) : "Unknown";
-    const tpLabel = isGp3 && (throughput === 125 || throughput == null) ? "125 MiB/s — included baseline" : throughput != null ? `${throughput} MiB/s` : "Unknown";
-    const assessment = metrics.unattached ? "Unattached — review for deletion" : "Normal configuration";
+    const iopsLabel = isGp3 && (iops === 3000 || iops == null) ? "3,000 - included baseline" : iops != null ? String(iops) : "Unknown";
+    const tpLabel = isGp3 && (throughput === 125 || throughput == null) ? "125 MiB/s - included baseline" : throughput != null ? `${throughput} MiB/s` : "Unknown";
+    const assessment = metrics.unattached ? "Unattached - review for deletion" : "Normal configuration";
     metricRows.push({ label: "Type", value: String(item.type_or_sku ?? "-") });
     metricRows.push({ label: "Size", value: size != null ? `${size} GiB` : "Unknown" });
     metricRows.push({ label: "State", value: String(item.state ?? "-") });
@@ -1077,7 +1203,7 @@ function normalizeResource(resource: unknown) {
     type: String(item.type_or_sku ?? "-"),
     state: String(item.state ?? "-"),
     metricRows,
-    metrics: metricRows.map((r) => `${r.label}: ${r.value}`).join(" · "),
+    metrics: metricRows.map((r) => `${r.label}: ${r.value}`).join("  -  "),
   };
 }
 

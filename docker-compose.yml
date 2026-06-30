@@ -4,11 +4,10 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - ./backend/.env
+      - ${BACKEND_ENV_FILE:-./backend/.env.example}
     environment:
       DATABASE_URL: sqlite:////data/cost_detective.db
     volumes:
-      - ./backend/.env:/app/.env:ro
       - cost-db:/data
 
   frontend:

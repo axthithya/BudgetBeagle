@@ -184,7 +184,7 @@ def test_recently_launched_ec2_does_not_claim_14_days_of_evidence() -> None:
     cpu = _cpu(0.13, datapoints=8, hours=2, launch="2026-06-28T09:00:00+00:00")
     report = build_cost_report(_scan([_ec2(cpu)]), pricing_resolver=StaticPrice(_missing_price()))
     finding = report["findings"][0]
-    assert finding["category"] == "Observation"
+    assert finding["category"] == "observation"
     assert finding["evidence"]["Requested analysis window"] == "14 days"
     assert finding["evidence"]["Actual covered duration"] == "2.0 hours"
     assert "over the last 14 days" not in finding["explanation"]
@@ -193,7 +193,7 @@ def test_recently_launched_ec2_does_not_claim_14_days_of_evidence() -> None:
 def test_low_cpu_with_insufficient_datapoints_is_low_confidence_observation() -> None:
     report = build_cost_report(_scan([_ec2(_cpu(0.13, datapoints=8, hours=2))]), pricing_resolver=StaticPrice(_missing_price()))
     finding = report["findings"][0]
-    assert finding["category"] == "Observation"
+    assert finding["category"] == "observation"
     assert finding["confidence"] == "low"
     assert finding["command"] is None
 
@@ -201,7 +201,7 @@ def test_low_cpu_with_insufficient_datapoints_is_low_confidence_observation() ->
 def test_low_cpu_with_sufficient_datapoints_creates_review_recommendation() -> None:
     report = build_cost_report(_scan([_ec2(_cpu(1.5, datapoints=48, hours=48))]), pricing_resolver=StaticPrice(_verified_price()))
     finding = report["findings"][0]
-    assert finding["category"] == "Recommendation"
+    assert finding["category"] == "recommendation"
     assert finding["confidence"] == "medium"
     assert finding["command"]["text"].startswith("aws ec2 stop-instances")
     assert "downtime" in finding["action_risk"]
@@ -334,7 +334,7 @@ def test_billing_context_feeds_report_metrics_and_confidence() -> None:
     assert report["metrics"]["account_total_ytd_display"] == "$18.45"
     assert report["metrics"]["selected_region_ytd_display"] == "$0.00"
     assert report["metrics"]["monthly_account_average_display"] == "$3.08/month"
-    assert report["confidence"]["score"] == 90
+    assert report["scan_confidence"]["score"] == 95
 
 
 def test_cost_explorer_access_denied_produces_warning() -> None:
@@ -387,7 +387,7 @@ def test_confidence_includes_explainable_factors() -> None:
         ),
         pricing_resolver=StaticPrice(_missing_price()),
     )
-    confidence = report["confidence"]
+    confidence = report["scan_confidence"]
     assert "score" in confidence
     assert "factors" in confidence
     assert isinstance(confidence["factors"], list)
@@ -398,13 +398,28 @@ def test_confidence_includes_explainable_factors() -> None:
         assert "name" in factor
         assert "effect" in factor
         assert "reason" in factor
-        assert factor["effect"] in ("positive", "negative")
+        assert factor["effect"] in ("positive", "negative", "neutral")
 
 
 def test_confidence_level_field_present() -> None:
     report = build_cost_report(_scan([]))
-    assert "level" in report["confidence"]
-    assert report["confidence"]["level"] in ("high", "medium", "low")
+    assert "level" in report["scan_confidence"]
+    assert report["scan_confidence"]["level"] in ("high", "medium", "low")
+
+
+def test_confidence_model_separates_scan_finding_and_savings_confidence() -> None:
+    unknown_report = build_cost_report(_scan([_ec2(_cpu(1.5, datapoints=48, hours=48))]), pricing_resolver=StaticPrice(_missing_price()))
+    unknown_finding = unknown_report["findings"][0]
+    assert "scan_confidence" in unknown_report
+    assert "finding_confidence" in unknown_finding
+    assert "savings_confidence" not in unknown_finding
+    assert unknown_report["savings_confidence"]["level"] == "not_applicable"
+
+    numeric_report = build_cost_report(_scan([_s3("absent", object_count=0, size_bytes=0)]))
+    numeric_finding = numeric_report["findings"][0]
+    assert numeric_finding["estimated_monthly_savings"] == 0.0
+    assert numeric_finding["savings_confidence"]["level"] == "high"
+    assert numeric_report["savings_confidence"]["level"] == "high"
 
 
 def test_warnings_have_structured_fields() -> None:
@@ -488,3 +503,104 @@ def test_lifecycle_status_without_dict_defaults_to_unknown() -> None:
     assert _lifecycle_status({"lifecycle_status": "present"}) == "present"
     assert _lifecycle_status({"lifecycle_status": "absent"}) == "absent"
     assert _lifecycle_status({"lifecycle_status": {"status": "unknown"}}) == "unknown"
+
+
+def _manual_regression_fixture() -> dict[str, Any]:
+    return {
+        "region": "ap-southeast-1",
+        "resources": [
+            _ec2(_cpu(0.13, datapoints=22, hours=22), instance_id="i-ap-southeast-1-manual"),
+            _ebs("vol-ap-southeast-1-manual", state="in-use", iops=3000, throughput=125),
+            _s3("absent", object_count=None, size_bytes=None),
+        ],
+        "warnings": [],
+        "errors": [],
+        "service_coverage": [
+            {"service": "EC2", "status": "completed", "count": 1},
+            {"service": "EBS", "status": "completed", "count": 1},
+            {"service": "S3", "status": "completed", "count": 1},
+            {"service": "RDS", "status": "no_resources", "count": 0},
+            {"service": "Load Balancing", "status": "no_resources", "count": 0},
+            {"service": "Elastic IP", "status": "no_resources", "count": 0},
+            {"service": "NAT Gateway", "status": "no_resources", "count": 0},
+        ],
+        "billing": {
+            "status": "available",
+            "account_total_ytd_usd": -0.001,
+            "selected_region_ytd_usd": 0.001,
+            "monthly_account_costs": [{"label": "May 2026", "amount_usd": -0.001, "display": "$-0.00"}],
+            "service_costs_ytd": [
+                {"name": "Amazon Simple Storage Service", "amount_usd": 0.0, "display": "$0.00"},
+                {"name": "Amazon Elastic Compute Cloud", "amount_usd": -0.001, "display": "$-0.00"},
+            ],
+            "region_costs_ytd": [{"name": "NoRegion", "amount_usd": -0.001, "display": "$-0.00"}],
+        },
+    }
+
+
+def test_manual_fresh_clone_fixture_has_canonical_counts_coverage_confidence_and_money() -> None:
+    report = build_cost_report(_manual_regression_fixture(), pricing_resolver=StaticPrice(_missing_price()))
+
+    assert report["resources_scanned"] == 3
+    assert report["confirmed_issues"] == 0
+    assert report["recommendations"] == 1
+    assert report["observations"] == 1
+    assert report["actionable_findings"] == 1
+    assert report["service_coverage_summary"]["services_scanned_display"] == "7/7"
+    assert report["service_coverage_summary"]["services_containing_resources_display"] == "3/7"
+    assert report["service_coverage_summary"]["resources_discovered"] == 3
+    assert report["scan_confidence"]["level"] == "high"
+    assert {item["category"] for item in report["findings"]} == {"observation", "recommendation"}
+    assert all(item["finding_confidence"]["level"] == "low" for item in report["findings"])
+    assert report["savings_confidence"]["level"] == "not_applicable"
+    assert report["estimated_monthly_savings_display"] == "Not enough data"
+    serialized = json.dumps(report)
+    assert "$-0.00" not in serialized
+    assert "-$0.00" not in serialized
+    assert "-0.00 USD" not in serialized
+    assert report["billing"]["region_costs_ytd"][0]["name"] == "Global / No Region"
+
+
+def test_service_coverage_counts_scan_completion_separately_from_resources() -> None:
+    from report_schema import build_service_coverage, coverage_summary
+
+    explicit = [
+        {"service": "EC2", "status": "completed", "count": 1},
+        {"service": "EBS", "status": "completed", "count": 1},
+        {"service": "S3", "status": "completed", "count": 1},
+        {"service": "RDS", "status": "no_resources", "count": 0},
+        {"service": "Load Balancing", "status": "no_resources", "count": 0},
+        {"service": "Elastic IP", "status": "no_resources", "count": 0},
+        {"service": "NAT Gateway", "status": "no_resources", "count": 0},
+    ]
+    summary = coverage_summary(build_service_coverage([], [], [], explicit))
+    assert summary["services_scanned"] == 7
+    assert summary["services_containing_resources"] == 3
+
+    failed = [*explicit[:-1], {"service": "NAT Gateway", "status": "failed", "count": 0}]
+    summary = coverage_summary(build_service_coverage([], [], [], failed))
+    assert summary["services_scanned"] == 6
+    assert summary["failed_services"] == 1
+
+    warning = [{"service": "S3", "status": "completed_with_warnings", "count": 0}]
+    summary = coverage_summary(build_service_coverage([], [], [], warning))
+    assert summary["services_scanned"] == 7
+
+    zero = [{**item, "count": 0, "status": "no_resources"} for item in explicit]
+    summary = coverage_summary(build_service_coverage([], [], [], zero))
+    assert summary["services_scanned"] == 7
+    assert summary["services_containing_resources"] == 0
+    assert summary["resources_discovered"] == 0
+
+
+def test_s3_absent_lifecycle_recommendation_remains_evidence_first() -> None:
+    report = build_cost_report(_scan([_s3("absent", object_count=None, size_bytes=None)]))
+    finding = report["findings"][0]
+    assert finding["category"] == "recommendation"
+    assert finding["evidence"]["Lifecycle status"] == "Absent"
+    assert finding["evidence"]["Stored bytes"] == "Unknown"
+    assert finding["evidence"]["Object count"] == "Unknown"
+    assert finding["estimated_monthly_savings"] is None
+    assert "savings_confidence" not in finding
+    assert finding["command"] is None
+    assert report["confirmed_issues"] == 0

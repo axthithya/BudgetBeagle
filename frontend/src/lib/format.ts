@@ -12,14 +12,14 @@ export function formatUSD(value: unknown): string {
   if (typeof num !== "number" || !Number.isFinite(num)) return "Not enough data";
   // Normalize -0 and values very close to zero
   const safe = Math.abs(num) < 0.005 ? 0 : num;
-  return `$${safe.toFixed(2)}`;
+  return `$${(safe === 0 ? 0 : safe).toFixed(2)}`;
 }
 
-/** Format monthly savings — returns "$X.XX/month" or "Not enough data". */
+/** Format monthly savings - returns "$X.XX/month" or "Not enough data". */
 export function formatMonthlySavings(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) {
     const safe = Math.abs(value) < 0.005 ? 0 : value;
-    return `$${safe.toFixed(2)}/month`;
+    return `$${(safe === 0 ? 0 : safe).toFixed(2)}/month`;
   }
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -28,9 +28,9 @@ export function formatMonthlySavings(value: unknown): string {
     if (bareNumber) {
       const num = Number(trimmed);
       const safe = Math.abs(num) < 0.005 ? 0 : num;
-      return `$${safe.toFixed(2)}/month`;
+      return `$${(safe === 0 ? 0 : safe).toFixed(2)}/month`;
     }
-    return trimmed;
+    return formatMoney(trimmed);
   }
   return "Not enough data";
 }
@@ -38,7 +38,17 @@ export function formatMonthlySavings(value: unknown): string {
 /** Format a USD value for display, with "Not enough data" fallback. */
 export function formatMoney(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) return formatUSD(value);
-  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "string" && value.trim()) {
+    const trimmed = value.trim();
+    const parsed = Number(trimmed.replace(/[$,]/g, "").replace(/\/month|\/year| USD/g, ""));
+    if (Number.isFinite(parsed) && Math.abs(parsed) < 0.005) {
+      if (trimmed.includes("/month")) return "$0.00/month";
+      if (trimmed.includes("/year")) return "$0.00/year";
+      if (trimmed.includes("USD")) return "0.00 USD";
+      return "$0.00";
+    }
+    return trimmed.replace("$-0.00", "$0.00").replace("-$0.00", "$0.00").replace("-0.00 USD", "0.00 USD");
+  }
   return "Not enough data";
 }
 

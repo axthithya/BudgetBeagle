@@ -22,6 +22,7 @@ from db import (
     User,
     complete_analysis,
     create_analysis,
+    cancel_analysis,
     create_user,
     fail_analysis,
     get_db,
@@ -30,7 +31,9 @@ from db import (
     serialize_analysis,
 )
 from progress import ProgressManager
+from report_schema import build_canonical_result, normalize_analysis_result
 from sanitize import mask_account_id, mask_arn, parse_identity, sanitize_report
+from export import generate_zip_export
 
 
 load_dotenv()
@@ -67,10 +70,14 @@ class AuthRequest(BaseModel):
 def on_startup() -> None:
     init_db()
     with SessionLocal() as db:
-        from db import cleanup_stale_jobs
+        from db import cleanup_history_retention, cleanup_stale_jobs
         count = cleanup_stale_jobs(db)
         if count > 0:
             print(f"Cleaned up {count} stale job(s) from previous run.")
+        retained_count = cleanup_history_retention(db)
+        if retained_count > 0:
+            print(f"Cleaned up {retained_count} analysis history record(s) by explicit retention settings.")
+        progress_manager.cleanup_expired()
 
 
 @app.get("/api/health")
@@ -277,13 +284,26 @@ def get_analysis(
     return {"analysis": _safe_serialize(analysis)}
 
 
+@app.get("/api/analyses/{analysis_id}/export/zip")
+def export_analysis_zip(
+    analysis_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    analysis = db.get(Analysis, analysis_id)
+    if not analysis or analysis.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found.")
+    if analysis.status not in {"completed", "completed_with_warnings"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Analysis is not completed.")
+    return generate_zip_export(_safe_serialize(analysis))
+
+
 @app.post("/api/analyses/{analysis_id}/cancel")
-def cancel_analysis_endpoint(
+async def cancel_analysis_endpoint(
     analysis_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    from db import cancel_analysis
     analysis = db.get(Analysis, analysis_id)
     if not analysis or analysis.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found.")
@@ -293,8 +313,14 @@ def cancel_analysis_endpoint(
         
     analysis = cancel_analysis(db, analysis_id, "Analysis was cancelled by the user.")
     if analysis:
-        # Notify clients
-        asyncio.create_task(progress_manager.broadcast(analysis_id, "Analysis cancelled."))
+        await progress_manager.publish(
+            analysis_id,
+            "Analysis cancelled.",
+            event="cancelled",
+            status="cancelled",
+            terminal=True,
+            details={"reason": "Analysis was cancelled by the user."},
+        )
     return {"analysis": _safe_serialize(analysis)}
 
 
@@ -327,51 +353,63 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
     try:
         analysis = db.get(Analysis, analysis_id)
         if not analysis or analysis.user_id != user_id:
-            await progress_manager.publish(analysis_id, "Analysis failed: analysis record not found.")
+            await progress_manager.publish(analysis_id, "Analysis failed: analysis record not found.", event="failed", status="failed", terminal=True)
+            return
+        if analysis.status == "cancelled":
             return
         analysis.status = "running"
         db.commit()
 
-        await progress_manager.publish(analysis_id, f"Scanning AWS resources in {region}...")
-        await progress_manager.publish(analysis_id, "Pulling CloudWatch metrics...")
+        async def stop_if_cancelled(stage: str) -> bool:
+            db.refresh(analysis)
+            if analysis.status != "cancelled":
+                return False
+            await progress_manager.publish(
+                analysis_id,
+                "Analysis cancelled.",
+                event="cancelled",
+                status="cancelled",
+                terminal=True,
+                details={"stage": stage, "reason": (analysis.analysis_result or {}).get("reason") or "Analysis was cancelled by the user."},
+            )
+            return True
+
+        if await stop_if_cancelled("before_scan"):
+            return
+        await progress_manager.publish(analysis_id, f"Scanning AWS resources in {region}...", status="running", details={"stage": "scan"})
+        await progress_manager.publish(analysis_id, "Pulling CloudWatch metrics...", status="running", details={"stage": "metrics"})
         scan_result = await run_in_threadpool(lambda: AwsScanner(region, resource_group).scan())
 
-        await progress_manager.publish(analysis_id, "Building deterministic cost report...")
-        db.refresh(analysis)
-        if analysis.status == "cancelled":
+        if await stop_if_cancelled("after_scan"):
             return
+        await progress_manager.publish(analysis_id, "Building deterministic cost report...", status="running", details={"stage": "analysis"})
         ai_analysis = await run_in_threadpool(lambda: analyze_costs(scan_result))
 
-        await progress_manager.publish(analysis_id, "Storing results...")
-        result = {
-            "region": region,
-            "resource_group": resource_group,
-            "scan": scan_result,
-            "analysis": ai_analysis,
-        }
-        # Remove raw account_id from stored data – only masked version should persist
-        if "account_id_raw" in result.get("scan", {}):
-            del result["scan"]["account_id_raw"]
-        savings_display = ai_analysis.get("estimated_monthly_savings_display")
-        if not savings_display:
-            raw_savings = ai_analysis.get("estimated_monthly_savings")
-            savings_display = "Not enough data" if raw_savings is None else str(raw_savings)
+        if await stop_if_cancelled("after_analysis"):
+            return
+        await progress_manager.publish(analysis_id, "Storing results...", status="running", details={"stage": "storage"})
+        result = build_canonical_result(region=region, resource_group=resource_group, scan_result=scan_result, analysis=ai_analysis)
+
+        if await stop_if_cancelled("before_storage"):
+            return
+        savings_display = result.get("report", {}).get("estimated_monthly_savings_display") or "Not enough data"
+        final_status = str(result.get("report", {}).get("status") or "completed")
         complete_analysis(
             db,
             analysis_id,
             result,
-            resources_scanned=ai_analysis.get("resources_scanned", len(scan_result.get("resources", []))),
-            issues_found=ai_analysis.get("confirmed_issues", ai_analysis.get("issues_found", len(ai_analysis.get("issues", [])))),
+            resources_scanned=int(result.get("report", {}).get("resources_scanned") or len(result.get("resources", []))),
+            issues_found=int(result.get("report", {}).get("confirmed_issues") or 0),
             estimated_savings=str(savings_display),
-            status=ai_analysis.get("status", "completed"),
+            status=final_status,
         )
-        await progress_manager.publish(analysis_id, "Analysis complete")
+        await progress_manager.publish(analysis_id, "Analysis complete", event="completed", status=final_status, terminal=True)
     except (ScannerAuthError, ScannerRegionError, ScannerError, RuntimeError) as exc:
         fail_analysis(db, analysis_id, str(exc))
-        await progress_manager.publish(analysis_id, f"Analysis failed: {exc}")
+        await progress_manager.publish(analysis_id, f"Analysis failed: {exc}", event="failed", status="failed", terminal=True, details={"reason": str(exc)})
     except Exception as exc:
         fail_analysis(db, analysis_id, "Unexpected analysis failure.")
-        await progress_manager.publish(analysis_id, f"Analysis failed: {exc.__class__.__name__}")
+        await progress_manager.publish(analysis_id, f"Analysis failed: {exc.__class__.__name__}", event="failed", status="failed", terminal=True, details={"reason": "Unexpected analysis failure."})
     finally:
         db.close()
 
@@ -384,9 +422,23 @@ def _auth_response(user: User) -> dict[str, Any]:
 
 
 def _safe_serialize(analysis: Analysis) -> dict[str, Any]:
-    """Serialize an analysis record with sensitive data sanitized."""
+    """Serialize an analysis record with sensitive data sanitized and schema-normalized."""
     data = serialize_analysis(analysis)
-    if isinstance(data.get("analysis_result"), dict):
-        data["analysis_result"] = sanitize_report(data["analysis_result"])
+    result = data.get("analysis_result")
+    if isinstance(result, dict):
+        if "error" in result and not any(key in result for key in ("report", "analysis", "scan", "findings", "resources")):
+            data["analysis_result"] = sanitize_report(result)
+        else:
+            data["analysis_result"] = sanitize_report(
+                normalize_analysis_result(result, region=data.get("region"), resource_group=data.get("scan_target"))
+            )
+    normalized = data.get("analysis_result") if isinstance(data.get("analysis_result"), dict) else {}
+    report = normalized.get("report", {}) if isinstance(normalized.get("report"), dict) else {}
+    data["issues_found"] = int(report.get("confirmed_issues") or data.get("issues_found") or 0)
+    data["confirmed_issues"] = int(report.get("confirmed_issues") or 0)
+    data["recommendations"] = int(report.get("recommendations") or 0)
+    data["observations"] = int(report.get("observations") or 0)
+    data["actionable_findings"] = int(report.get("actionable_findings") or data["confirmed_issues"] + data["recommendations"])
+    data["service_coverage_summary"] = report.get("service_coverage_summary", {})
     data["schema_version"] = "2.0"
     return data
