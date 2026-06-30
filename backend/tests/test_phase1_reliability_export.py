@@ -80,6 +80,36 @@ def test_cancel_completed_analysis_is_safe_noop(monkeypatch: pytest.MonkeyPatch,
     assert response.json()["analysis"]["status"] == "completed"
 
 
+def test_retry_analyze_creates_new_analysis_record(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    main = _fresh_app(monkeypatch, tmp_path)
+
+    def fake_create_task(coro: Any) -> object:
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(main.asyncio, "create_task", fake_create_task)
+
+    with TestClient(main.app) as client:
+        token, user_id = _signup(client, "retry@example.com")
+        headers = {"Authorization": f"Bearer {token}"}
+        first = client.post("/api/analyze", json={"region": "us-east-1", "resource_group": None}, headers=headers)
+        second = client.post("/api/analyze", json={"region": "us-east-1", "resource_group": None}, headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_id = first.json()["analysis_id"]
+    second_id = second.json()["analysis_id"]
+    assert first_id != second_id
+
+    db = main.SessionLocal()
+    try:
+        records = db.query(main.Analysis).filter(main.Analysis.user_id == user_id).order_by(main.Analysis.id).all()
+        assert [record.id for record in records] == [first_id, second_id]
+        assert [record.status for record in records] == ["queued", "queued"]
+    finally:
+        db.close()
+
+
 def test_cancellation_after_scan_prevents_later_stages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     main = _fresh_app(monkeypatch, tmp_path)
     main.init_db()
