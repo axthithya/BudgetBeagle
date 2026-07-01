@@ -19,16 +19,18 @@ BudgetBeagle's goal is to become an open-source, evidence-first AWS FinOps assis
 
 ## Phase 2A: Multi-Region And Native Recommendation Foundation
 
-- 2A.1 Multi-region scanning foundation: COMPLETE.
+- 2A.1 Multi-region scanning foundation: RELEASE CANDIDATE / FINAL VALIDATION.
   - Single-region legacy compatibility.
   - Selected-regions and all-enabled-regions scan modes.
   - Structured region discovery with `ec2:DescribeRegions`.
   - Bounded multi-region orchestration and partial regional failure reporting.
-  - Schema v2.1, sanitized regional exports, service telemetry accounting, and future recommendation adapter foundation.
+  - Schema v2.1, sanitized regional exports, service telemetry accounting, and future recommendation adapter foundation are implemented on the Phase 2A branch. Final real-AWS validation, CI, PR review, and merge are still required before completion.
 - 2A.2 AWS-native recommendations: NOT STARTED.
   - Future work may integrate Compute Optimizer and Cost Optimization Hub through the adapter interface.
   - Do not make live AWS-native recommendation calls until Phase 2A.2 is explicitly started.
 - 2A.3 Top Savings page: NOT STARTED.
+- 2A.4 Evidence and confidence expansion: NOT STARTED.
+- 2A.5 Phase 2A hardening and release wrap-up: NOT STARTED.
 
 ## Phase 2B: Open Source Polish
 

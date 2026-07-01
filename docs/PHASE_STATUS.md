@@ -17,9 +17,17 @@
 
 ## Phase 2A.1: Multi-Region Scanning Foundation
 
-**Status: COMPLETE**
+**Status: RELEASE CANDIDATE - FINAL VALIDATION PENDING**
 
-Completion evidence: local backend tests, frontend typecheck/tests/build/audit, Docker config, launcher check, documentation, branch push, and GitHub Actions passed on 2026-07-01.
+Current evidence: implementation and recovery fixes are committed and pushed on `phase2a-multiregion-native-recommendations`. Local checks and GitHub Actions must pass for the latest release-candidate commit, and final two-region real-AWS validation must pass before this phase is marked complete or merged into `main`.
+
+### Remaining Completion Gates
+
+- GitHub Actions passes for the latest branch commit.
+- Final real-AWS validation passes for `ap-northeast-1` and `ap-southeast-1`.
+- Export review confirms no `account_id_raw` fields or full 12-digit AWS account IDs in JSON, CSV, or ZIP content.
+- Regional service telemetry, global-once S3 attribution, billing normalization, cancellation, refresh, and history reload are manually verified.
+- Pull request is reviewed and merged into `main`.
 
 ### Verified Architecture Audit
 

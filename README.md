@@ -11,6 +11,7 @@ BudgetBeagle is read-only by default. It scans and analyzes your AWS account, bu
 - [What Problem This Solves](#what-problem-this-solves)
 - [How It Works](#how-it-works)
 - [Features](#features)
+- [Development Status](#development-status)
 - [Before You Start](#before-you-start)
 - [Windows Quick Start](#windows-quick-start)
 - [How To Fill `backend/.env`](#how-to-fill-backendenv)
@@ -89,6 +90,16 @@ More architecture notes are in [Architecture.MD](./Architecture.MD), and the req
 - Read-only AWS scanning behavior
 - SQLite local database by default
 - Docker option for users who prefer containers
+
+## Development Status
+
+- Phase 1 - Complete, released as v0.1.0.
+- Phase 2A - In progress.
+- Phase 2A.1 - Multi-region foundation under final validation.
+- Phase 2A.2-2A.5 - Planned.
+- Phase 2B, 2C, and Phase 3 - Planned.
+
+[View the complete future development plan](FUTURE_PLAN.md)
 
 ## Before You Start
 
