@@ -136,6 +136,8 @@ def _grouped_ytd(client: Any, start: date, end: date, dimension: str) -> list[di
     for period in response.get("ResultsByTime", []):
         for group in period.get("Groups", []):
             key = str((group.get("Keys") or ["Unknown"])[0] or "Unknown")
+            if dimension == "REGION":
+                key = _billing_region_name(key)
             amount = _amount(group.get("Metrics", {}).get("UnblendedCost", {}))
             totals[key] = round(totals.get(key, 0.0) + amount, 2)
     result = []
@@ -148,10 +150,16 @@ def _grouped_ytd(client: Any, start: date, end: date, dimension: str) -> list[di
 
     for key, amount in sorted(totals.items(), key=sort_key):
         amount = _normalize_amount(amount)
-        if key == "NoRegion":
-            key = "Global / No Region"
         result.append({"name": key, "amount_usd": amount, "display": _money(amount)})
     return result
+
+
+
+def _billing_region_name(value: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized.lower() in {"noregion", "global", "global / no region"}:
+        return "Global / No Region"
+    return normalized or "Unknown"
 
 
 def _billing_insights(

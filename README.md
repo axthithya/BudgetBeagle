@@ -71,7 +71,7 @@ More architecture notes are in [Architecture.MD](./Architecture.MD), and the req
 - AWS scan mode picker: single region, selected regions, or all enabled regions
 - Searchable selected-region checklist with select all, clear all, retry, and permission-denied states
 - Optional AWS Resource Group scan filter
-- Live progress updates through WebSocket, including per-region progress for multi-region scans
+- Live progress updates through WebSocket, including weighted overall progress, region counts, and active regions for multi-region scans
 - Scan history for each signed-in user
 - Saved reports you can reopen later
 - Account-wide and selected-region YTD billing summaries when Cost Explorer is available
@@ -85,7 +85,7 @@ More architecture notes are in [Architecture.MD](./Architecture.MD), and the req
 - Comprehensive Resources table with detailed expandable service properties and metrics
 - Human-readable explanations
 - Copyable `aws` CLI fix commands only when backend validation passes
-- Formatted CSV/ZIP exports and canonical JSON history export with region metadata
+- Sanitized CSV/ZIP exports and canonical JSON history export with region metadata; raw account IDs are removed from downloadable output
 - Read-only AWS scanning behavior
 - SQLite local database by default
 - Docker option for users who prefer containers
@@ -253,7 +253,7 @@ py run.py
 5. For single-region scans, optionally choose an AWS Resource Group.
 6. For selected-regions scans, search, select, clear, or select all regions from the checklist.
 7. Start the scan.
-8. Watch progress messages and region counts.
+8. Watch overall progress messages and region counts.
 9. Open the generated report.
 10. Review every issue, estimated saving, explanation, failed region, and fix command.
 11. Copy a command only after you understand what it will do.
@@ -268,19 +268,20 @@ BudgetBeagle supports three canonical scan modes:
 | Selected regions | Scan exactly the valid regions selected in the dashboard checklist. The backend stores both the submitted list and the deduplicated resolved execution list. |
 | All enabled regions | Resolve enabled AWS regions with read-only `ec2:DescribeRegions`, then scan them in deterministic alphabetical order. |
 
-Multi-region scans use bounded concurrency controlled by `MULTI_REGION_CONCURRENCY`. Global/account APIs are not run once per region: S3 bucket listing and Cost Explorer billing run once per scan, then their data is associated with the relevant regions or global scope.
+Multi-region scans use bounded concurrency controlled by `MULTI_REGION_CONCURRENCY`. Global/account APIs are not run once per region: S3 bucket listing and Cost Explorer billing run once per scan, then their data is associated with the relevant regions or global scope. Regional service telemetry records services attempted, completed, and failed; services with zero resources still count as completed when the scanner checked them successfully.
 
-Partial regional failures stay visible. If at least one region succeeds and another fails, the report completes as `completed_with_warnings` and shows failed-region details, warnings, safe error messages, and regional counts. If every region fails and no useful result exists, the scan is marked `failed`.
+Partial regional failures stay visible. If at least one region succeeds and another fails, the report completes as `completed_with_warnings` and shows failed-region details, warnings, safe error messages, and regional counts. If every region fails and no useful result exists, the scan is marked `failed`. The progress bar is labeled `Overall progress` because the percentage is weighted by scan stage, not simply `completed regions / total regions`.
 
-Scan regions and Cost Explorer billed regions are different concepts. `requested_regions` and `resolved_regions` describe what BudgetBeagle scanned; `billing.region_costs_ytd` describes AWS billing dimensions returned by Cost Explorer, including `Global / No Region` values.
+Scan regions and Cost Explorer billed regions are different concepts. `requested_regions` and `resolved_regions` describe what BudgetBeagle scanned; `billing.region_costs_ytd` describes AWS billing dimensions returned by Cost Explorer. Equivalent global billing dimensions such as `global`, `NoRegion`, and `Global / No Region` are normalized into one `Global / No Region` row before display/export.
 
-Old Phase 1 reports still load as legacy `single_region` reports. New reports use schema v2.1 and include `regional_results`, resource/finding region or global scope, and partial failure warnings.
+Old Phase 1 reports still load as legacy `single_region` reports. New reports use schema v2.1 and include `regional_results`, resource/finding region or global scope, `legacy_primary_region` compatibility metadata, and partial failure warnings. New consumers should use `requested_regions` and `resolved_regions` for scan coverage instead of treating the singular `region` field as the whole scan.
 
 Known limitations for Phase 2A.1:
 
 - AWS Compute Optimizer and Cost Optimization Hub are not called yet.
 - Resource Group filtering remains single-region only.
 - CLI fix commands are examples only; BudgetBeagle never executes them.
+
 ## What The Report Means
 
 Each report is organized into tabs:
@@ -294,7 +295,7 @@ Each report is organized into tabs:
 | Commands | Backend-validated `aws` CLI commands only when enough evidence exists and service constraints are satisfied |
 | Warnings | Permission, regional failure, or inspection gaps such as denied lifecycle, region discovery, or Cost Explorer checks |
 
-Savings are shown only when the backend has numeric, evidence-backed data. Unknown or unsupported savings are displayed as `Not enough data`. Confidence scores are derived from finding confidence, scan warnings, and whether billing context was available.
+Savings are shown only when the backend has numeric, evidence-backed data. Unknown or unsupported savings are displayed as `Not enough data`. Confidence scores are derived from finding confidence, scan warnings, and whether billing context was available. Downloaded JSON/ZIP/CSV exports are sanitized recursively and must not include `account_id_raw`, full 12-digit AWS account IDs, access keys, session tokens, or full ARNs.
 
 Treat the report as a decision aid. For example, an "idle" resource might still be important if it is used during month-end processing, disaster recovery, demos, or low-traffic production windows.
 

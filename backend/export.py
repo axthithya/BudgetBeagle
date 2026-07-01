@@ -183,13 +183,23 @@ def _regions_csv(payload: dict[str, Any]) -> str:
             item.get("resources_discovered", 0),
             item.get("findings_generated", 0),
             item.get("warning_count", 0),
-            item.get("error_category", ""),
-            item.get("safe_error_message", ""),
+            _region_error_cell(item, "error_category"),
+            _region_error_cell(item, "safe_error_message"),
             "; ".join(item.get("services_attempted", []) or []),
             "; ".join(item.get("services_completed", []) or []),
             "; ".join(item.get("services_failed", []) or []),
         ])
     return _csv(rows)
+
+
+def _region_error_cell(item: dict[str, Any], key: str) -> Any:
+    value = item.get(key)
+    if value is not None and value != "":
+        return value
+    status = str(item.get("status") or "")
+    if item.get("services_failed") or status == "failed":
+        return "Unknown"
+    return ""
 
 def _coverage_csv(payload: dict[str, Any]) -> str:
     rows = [["Service", "Status", "Count", "Scanned", "Has Resources", "Label"]]

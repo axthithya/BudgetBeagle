@@ -1,7 +1,7 @@
 """Reusable helpers for masking AWS identifiers and sanitizing API output.
 
 All functions in this module are safe to call from any thread.  They never
-modify the original data structures – they return new objects.
+modify the original data structures - they return new objects.
 """
 
 from __future__ import annotations
@@ -58,10 +58,10 @@ def mask_arn(arn: str | None) -> str:
     """Convert a full IAM ARN to a safe identity label.
 
     ``arn:aws:iam::277731792560:user/budgetbeagle-app``
-      → ``IAM user: budgetbeagle-app``
+      -> ``IAM user: budgetbeagle-app``
 
     ``arn:aws:sts::277731792560:assumed-role/MyRole/session``
-      → ``IAM role: MyRole``
+      -> ``IAM role: MyRole``
     """
     if not arn or not isinstance(arn, str):
         return "Unknown identity"
@@ -149,6 +149,7 @@ def scrub_sensitive_text(text: str) -> str:
     text = _SESSION_TOKEN_RE.sub("[REDACTED_TOKEN]", text)
     text = _CREDENTIAL_PATH_RE.sub("[REDACTED_PATH]", text)
     text = _ARN_RE.sub("[REDACTED_ARN]", text)
+    text = _ACCOUNT_ID_RE.sub(lambda match: mask_account_id(match.group()), text)
     return text
 
 
@@ -217,41 +218,41 @@ def sanitize_report(report: dict[str, Any]) -> dict[str, Any]:
 def _sanitize_dict(obj: Any) -> None:
     """Recursively walk a dict/list and mask sensitive values in-place."""
     if isinstance(obj, dict):
-        # Mask known account_id fields
-        for key in ("account_id",):
-            if key in obj and isinstance(obj[key], str) and len(obj[key]) >= 12:
-                obj[key] = mask_account_id(obj[key])
+        raw_account_id = obj.pop("account_id_raw", None)
+        if isinstance(raw_account_id, str) and raw_account_id and not obj.get("account_id"):
+            obj["account_id"] = mask_account_id(raw_account_id)
 
-        # Mask known ARN fields
-        for key in ("arn", "identity_arn", "Arn"):
-            if key in obj and isinstance(obj[key], str) and obj[key].startswith("arn:"):
-                obj[key] = mask_arn(obj[key])
-
-        # Sanitize raw error message strings
-        for key in ("message", "error_message", "Message"):
-            if key in obj and isinstance(obj[key], str):
-                obj[key] = scrub_sensitive_text(obj[key])
+        for key, value in list(obj.items()):
+            lower_key = str(key).lower()
+            if isinstance(value, str) and (lower_key == "account_id" or lower_key.endswith("_account_id")):
+                obj[key] = mask_account_id(value)
+            elif isinstance(value, str) and lower_key in {"arn", "identity_arn"} and value.startswith("arn:"):
+                obj[key] = mask_arn(value)
+            elif isinstance(value, str):
+                obj[key] = scrub_sensitive_text(value)
 
         # Migrate old boolean lifecycle fields conservatively
         _migrate_lifecycle_booleans(obj)
 
         for value in obj.values():
             _sanitize_dict(value)
-
     elif isinstance(obj, list):
-        for item in obj:
-            _sanitize_dict(item)
+        for index, item in enumerate(obj):
+            if isinstance(item, str):
+                obj[index] = scrub_sensitive_text(item)
+            else:
+                _sanitize_dict(item)
 
 
 def _migrate_lifecycle_booleans(obj: dict[str, Any]) -> None:
     """Map old lifecycle boolean fields to tri-state when found in stored data.
 
     Rules:
-    - If a warning exists in the same context with AccessDenied → unknown
+    - If a warning exists in the same context with AccessDenied -> unknown
     - Never infer present/absent from ambiguous booleans alone
     """
     if "lifecycle_status" in obj and isinstance(obj["lifecycle_status"], dict):
-        # Already migrated – just clean up old fields
+        # Already migrated - just clean up old fields
         obj.pop("has_lifecycle_policy", None)
         obj.pop("missing_lifecycle_policy", None)
         return
@@ -263,7 +264,7 @@ def _migrate_lifecycle_booleans(obj: dict[str, Any]) -> None:
     has_lc = obj.get("has_lifecycle_policy")
     missing_lc = obj.get("missing_lifecycle_policy")
 
-    # Conservative mapping: if value is None or we can't determine → unknown
+    # Conservative mapping: if value is None or we can't determine -> unknown
     if has_lc is None and missing_lc is not None:
         if missing_lc is True:
             obj["lifecycle_status"] = {"status": "absent"}

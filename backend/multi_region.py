@@ -162,6 +162,17 @@ def build_region_result(
     resources = resources or []
     warnings = warnings or []
     errors = errors or []
+    attempted = _normalize_service_list(services_attempted or supported_scan_services())
+    default_failed = [str(item.get("service") or "") for item in errors]
+    failed = _normalize_service_list(services_failed if services_failed is not None else default_failed)
+    if services_completed is None:
+        if status in {"failed", "cancelled", "interrupted"}:
+            completed = []
+        else:
+            completed = [service for service in attempted if service not in failed]
+    else:
+        completed = _normalize_service_list(services_completed)
+    status = _consistent_region_status(status, attempted, completed, failed)
     return {
         "region": region,
         "status": status if status in REGIONAL_STATUSES else "failed",
@@ -174,9 +185,9 @@ def build_region_result(
         "warning_count": len(warnings),
         "error_category": error_category,
         "safe_error_message": safe_error_message,
-        "services_attempted": services_attempted or supported_scan_services(),
-        "services_completed": services_completed or _completed_services(resources, warnings, errors),
-        "services_failed": services_failed or [str(item.get("service") or "unknown") for item in errors],
+        "services_attempted": attempted,
+        "services_completed": completed,
+        "services_failed": failed,
     }
 
 
@@ -330,6 +341,24 @@ def service_coverage_for_aggregate(resources: list[dict[str, Any]], warnings: li
 
 def summary_counts(findings: list[dict[str, Any]]) -> dict[str, int]:
     return finding_summary(findings)
+
+
+def _normalize_service_list(values: list[str] | None) -> list[str]:
+    services: list[str] = []
+    for value in values or []:
+        service = _coverage_name(str(value)) or str(value or "").strip()
+        if service and service not in services:
+            services.append(service)
+    return services
+
+
+def _consistent_region_status(status: str, attempted: list[str], completed: list[str], failed: list[str]) -> str:
+    normalized = status if status in REGIONAL_STATUSES else "failed"
+    if attempted and set(failed) >= set(attempted) and not completed:
+        return "failed"
+    if normalized == "completed" and (failed or (attempted and not completed)):
+        return "completed_with_warnings"
+    return normalized
 
 
 def _completed_services(resources: list[dict[str, Any]], warnings: list[dict[str, Any]], errors: list[dict[str, Any]]) -> list[str]:

@@ -16,12 +16,12 @@ BudgetBeagle is an evidence-first AWS FinOps application. It reads AWS inventory
 - **Region discovery**: `backend/region_discovery.py` uses read-only `ec2:DescribeRegions`, validates region identifiers, sorts deterministically, removes duplicates, and returns structured safe errors.
 - **Scan normalization and identity**: `backend/multi_region.py` owns scan mode normalization, bounded concurrency validation, resource/finding metadata, canonical identity, deduplication, and final regional aggregation helpers.
 - **Scanner**: `backend/aws_scanner.py` creates regional boto3 clients for inventory and metrics. It can skip global S3 and billing when used by multi-region workers.
-- **Orchestrator**: `backend/scan_orchestrator.py` runs resolved regions through a bounded thread pool, preserves partial results, avoids per-region global calls, and emits structured progress details.
-- **Billing**: `backend/billing.py` calls Cost Explorer once per scan and keeps scan regions separate from AWS billed-region dimensions.
+- **Orchestrator**: `backend/scan_orchestrator.py` runs resolved regions through a bounded thread pool, preserves partial results, avoids per-region global calls, attributes the global-once S3 pass into regional service telemetry, and emits structured progress details.
+- **Billing**: `backend/billing.py` calls Cost Explorer once per scan, keeps scan regions separate from AWS billed-region dimensions, and normalizes equivalent global billed-region aliases into `Global / No Region`.
 - **Rules and adapters**: `backend/cost_rules.py` produces current findings with source `budgetbeagle_rule`. `backend/recommendation_adapters.py` defines the internal normalization shape for future `aws_compute_optimizer` and `aws_cost_optimization_hub` sources without calling them in Phase 2A.1.
-- **Progress**: `backend/progress.py` stores progress events with TTL cleanup. WebSocket progress and polling fallback both consume the same persisted events.
+- **Progress**: `backend/progress.py` stores progress events with TTL cleanup. WebSocket progress and polling fallback both consume the same persisted events; the frontend labels the weighted stage percentage as `Overall progress`.
 - **Persistence**: Reports are stored as canonical JSON in the existing analysis table. v2.1 metadata is added without destructive database migrations; old v2.0 reports are adapted on read.
-- **Exports**: `backend/export.py` produces UTF-8 JSON/CSV/ZIP exports, including per-region status in `regions.csv`.
+- **Exports**: `backend/export.py` produces recursively sanitized UTF-8 JSON/CSV/ZIP exports, including per-region status in `regions.csv`, without `account_id_raw` or full account IDs.
 
 ## Multi-Region Flow
 
@@ -45,9 +45,9 @@ Regional APIs are called once per resolved region. Global/account APIs are calle
 
 - S3 bucket listing is global and filtered by bucket location.
 - Cost Explorer billing is account-level and queried once for the selected scan regions.
-- Account identity is captured once and masked in persisted/exported outputs.
+- Account identity is captured once, masked in persisted/exported outputs, and removed from raw `account_id_raw` export paths.
 
-This prevents duplicated resources, findings, and billing totals when multiple regions are scanned.
+This prevents duplicated resources, findings, service telemetry, and billing totals when multiple regions are scanned.
 
 ## Cancellation And Partial Success
 
@@ -58,4 +58,4 @@ Cancellation is checked before expensive stages and between regional completions
 - Phase 2A.1 does not call AWS Compute Optimizer or AWS Cost Optimization Hub.
 - Multi-region scans currently disable Resource Group filtering because AWS Resource Groups are selected from the single-region setup flow.
 - Per-service progress is best effort; existing scanner internals still emit coarse service/stage messages.
-- Manual AWS validation is still required before marking Phase 2A.1 complete.
+- Phase 2A.1 does not yet call native AWS recommendation services; those remain Phase 2A.2 work.

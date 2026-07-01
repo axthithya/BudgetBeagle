@@ -8,7 +8,8 @@ Schema v2.1 adds multi-region metadata while keeping Phase 1 v2.0 reports readab
 {
   "schema_version": "2.1",
   "analysis_result": {
-    "region": "2 scan regions",
+    "region": "us-east-1",
+    "legacy_primary_region": "us-east-1",
     "region_mode": "selected_regions",
     "requested_regions": ["us-east-1", "us-west-2"],
     "resolved_regions": ["us-east-1", "us-west-2"],
@@ -26,8 +27,8 @@ Schema v2.1 adds multi-region metadata while keeping Phase 1 v2.0 reports readab
         "warnings": [],
         "error_category": null,
         "safe_error_message": null,
-        "services_attempted": ["EC2", "EBS", "RDS", "Load Balancing", "Elastic IP", "NAT Gateway"],
-        "services_completed": ["EC2", "EBS"],
+        "services_attempted": ["EC2", "EBS", "Elastic IP", "Load Balancing", "RDS", "NAT Gateway", "S3"],
+        "services_completed": ["EC2", "EBS", "Elastic IP", "Load Balancing", "RDS", "NAT Gateway", "S3"],
         "services_failed": []
       }
     ],
@@ -69,6 +70,8 @@ Schema v2.1 adds multi-region metadata while keeping Phase 1 v2.0 reports readab
       }
     ],
     "scan": {
+      "region": "us-east-1",
+      "legacy_primary_region": "us-east-1",
       "region_mode": "selected_regions",
       "requested_regions": ["us-east-1", "us-west-2"],
       "resolved_regions": ["us-east-1", "us-west-2"],
@@ -90,11 +93,11 @@ Schema v2.1 adds multi-region metadata while keeping Phase 1 v2.0 reports readab
 
 ## Regional Result Status
 
-Each resolved region can be `pending`, `running`, `completed`, `completed_with_warnings`, `failed`, `cancelled`, or `interrupted`. Failed regions remain visible in reports and exports. Overall status remains one of the existing terminal states: `completed`, `completed_with_warnings`, `failed`, `cancelled`, or `interrupted`.
+Each resolved region can be `pending`, `running`, `completed`, `completed_with_warnings`, `failed`, `cancelled`, or `interrupted`. Failed regions remain visible in reports and exports. Overall status remains one of the existing terminal states: `completed`, `completed_with_warnings`, `failed`, `cancelled`, or `interrupted`. Regional service lists record attempted, completed, and failed services; a successful service with zero resources is still completed. The global-once S3 pass is attributed into regional service telemetry without duplicating S3 API calls or bucket resources.
 
 ## Identity And Scope
 
-Regional resources include `region`, `scope`, `account_id`, and canonical identity metadata. Global resources use explicit global scope and are not copied into every region. Findings include `source`, `region` or global scope, service, resource ID, and rule/recommendation type so only truly identical items are deduplicated.
+Regional resources include `region`, `scope`, masked `account_id`, and canonical identity metadata. Global resources use explicit global scope and are not copied into every region. Findings include `source`, `region` or global scope, service, resource ID, and rule/recommendation type so only truly identical items are deduplicated. `region` and `scan.region` are legacy primary-region compatibility fields; new consumers should use `requested_regions` and `resolved_regions` for scan coverage. `legacy_primary_region` repeats the compatibility value explicitly.
 
 ## Counters
 
@@ -114,7 +117,7 @@ Service coverage separates scan completion from resource presence:
 
 ## Billing Semantics
 
-Cost Explorer rows are account-level billing context, not per-region scan inventory. Billing is collected once per scan. `selected_regions` records the scan regions used to filter selected-region spend, while `region_costs_ytd` records AWS billed-region dimensions. Global and `NoRegion` rows are preserved as billing data and are not converted into scan regions.
+Cost Explorer rows are account-level billing context, not per-region scan inventory. Billing is collected once per scan. `selected_regions` records the scan regions used to filter selected-region spend, while `region_costs_ytd` records AWS billed-region dimensions. Equivalent global billing aliases such as `global`, `NoRegion`, and `Global / No Region` are normalized into one `Global / No Region` row and are not converted into scan regions.
 
 Exports normalize near-zero monetary values before display. Values whose absolute value is below half a cent serialize as `$0.00`, never `$-0.00`, `-$0.00`, or `-0.00 USD`.
 
@@ -132,4 +135,4 @@ The ZIP export preserves the Phase 1 files and adds `regions.csv`:
 - `service-coverage.csv`
 - `regions.csv`
 
-All export files remain UTF-8 and must not contain credentials, session tokens, full unmasked account IDs, or sensitive stack traces.
+All export files remain UTF-8 and must not contain `account_id_raw`, credentials, session tokens, full unmasked account IDs, full ARNs, or sensitive stack traces. `regions.csv` leaves completed-region error fields blank when there is no error.

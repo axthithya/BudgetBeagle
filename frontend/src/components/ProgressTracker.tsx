@@ -39,7 +39,7 @@ export function ProgressTracker({ messages, details }: ProgressTrackerProps) {
           <div>
             <div className="flex items-center justify-between gap-3 text-xs text-slate-400">
               <span>{details.region_mode ? labelMode(details.region_mode) : "Scan progress"}</span>
-              <span>{percent}%</span>
+              <span>Overall progress: {percent}%</span>
             </div>
             <div className="mt-2 h-2 overflow-hidden rounded-full bg-cloud-ink" aria-hidden="true">
               <div className="h-full rounded-full bg-cloud-cyan transition-all" style={{ width: `${percent}%` }} />

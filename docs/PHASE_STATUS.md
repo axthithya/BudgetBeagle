@@ -30,28 +30,28 @@ Completion evidence: local backend tests, frontend typecheck/tests/build/audit, 
 - Region selection: legacy region selection is normalized in `backend/multi_region.py`; all-enabled region resolution uses `backend/region_discovery.py` and `ec2:DescribeRegions`.
 - Resource scanners: `AwsScanner.scan()` covers EC2, EBS, Elastic IP, NAT Gateway, ELB, RDS, and optional S3. Regional workers disable per-region billing and per-region S3 to avoid global duplication.
 - Deterministic rules: `backend/cost_rules.py` remains the only source of live findings in this milestone and now preserves resource region, scope, and `budgetbeagle_rule` source metadata.
-- Billing and Cost Explorer: `backend/billing.py` accepts selected regions, queries account and regional dimensions once, and keeps scan regions separate from billed-region rows.
+- Billing and Cost Explorer: `backend/billing.py` accepts selected regions, queries account and regional dimensions once, keeps scan regions separate from billed-region rows, and merges equivalent global aliases into `Global / No Region`.
 - Pricing calls: existing pricing behavior remains deterministic and evidence-backed; no Phase 2A.2 AWS-native recommendation APIs are called.
 - Progress manager: `backend/progress.py` remains the storage/replay layer. Multi-region progress adds structured `details` while preserving message-based Phase 1 behavior.
-- WebSocket progress: `/ws/progress/{analysis_id}` in `backend/main.py` replays and streams progress events. Multi-region details include region counts, active regions, warnings, resources, findings, and monotonic percentage.
+- WebSocket progress: `/ws/progress/{analysis_id}` in `backend/main.py` replays and streams progress events. Multi-region details include region counts, active regions, warnings, resources, findings, and a monotonic weighted percentage displayed as `Overall progress`.
 - Polling fallback: frontend polling in `frontend/src/pages/Dashboard.tsx` still resumes active analyses when WebSocket delivery is interrupted.
 - Cancellation: existing cancellation state is checked before and after scanner/analyzer stages; multi-region orchestration checks cancellation between regional completions.
 - Report persistence: canonical report payloads are stored in the `Analysis.analysis_result` JSON column without destructive migrations.
 - History loading: `/api/history` and `/api/analyses/{id}` continue returning saved reports; `backend/report_schema.py` adapts old reports to v2.1-compatible defaults at read/serialization time.
 - Retry behavior: retrying a prior analysis creates a new `Analysis` row and reruns the normalized request without mutating the old report.
-- Exports: `backend/export.py` creates `report.json`, existing CSV files, and the new `regions.csv` with region status, counts, warnings, and safe error text.
+- Exports: `backend/export.py` creates recursively sanitized `report.json`, existing CSV files, and the new `regions.csv` with region status, counts, service telemetry, and safe error text; completed regions with no error export blank error cells.
 - Frontend scan setup: `frontend/src/pages/Dashboard.tsx` now exposes single-region, selected-regions, and all-enabled-regions modes.
-- Frontend report types: `frontend/src/lib/api.ts` includes v2.1 regional result, scan mode, and region/scope metadata types.
+- Frontend report types: `frontend/src/lib/api.ts` includes v2.1 regional result, scan mode, `legacy_primary_region`, and region/scope metadata types.
 - Frontend progress: `frontend/src/components/ProgressTracker.tsx` renders structured multi-region progress when present and the Phase 1 message list for legacy scans.
 - Existing fixtures: backend tests use mocked AWS clients and frontend tests use mocked REST responses; no automated test should require real AWS credentials.
 - Existing schema version: Phase 1 canonical reports used `2.0`; Phase 2A.1 reports use `2.1` with compatibility defaults for old payloads.
-- Single-region assumptions found and addressed: request payloads, region discovery, scan result region fields, command region flags, billing selected-region labels, progress UI, report table columns, warnings, export headers, and report schema defaults.
+- Single-region assumptions found and addressed: request payloads, region discovery, legacy primary-region fields, scan result region fields, command region flags, billing selected-region labels, progress UI, report table columns, warnings, export headers, and report schema defaults.
 
 ### Implementation Plan
 
 - Normalize all scan requests into canonical mode, requested regions, and resolved regions.
 - Discover enabled regions with read-only `ec2:DescribeRegions`, structured safe errors, deterministic sorting, duplicate removal, and identifier validation.
-- Add a bounded multi-region orchestration layer with deterministic aggregation, partial failure capture, S3/global billing single-call behavior, and cancellation checks.
+- Add a bounded multi-region orchestration layer with deterministic aggregation, partial failure capture, S3/global billing single-call behavior, service telemetry accounting, and cancellation checks.
 - Add canonical resource/finding identity helpers so retries and partial results do not duplicate identical resources or findings.
 - Extend report schema and export formats to include per-region status, region metadata, global/regional resource splits, and partial failure warnings.
 - Keep old Phase 1 reports readable as legacy `single_region` reports without destructive migrations.

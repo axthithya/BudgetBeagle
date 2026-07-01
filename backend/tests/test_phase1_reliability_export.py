@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import importlib
 import io
 import json
+import re
 import sys
 import zipfile
 from datetime import timedelta
@@ -16,6 +18,23 @@ from fastapi.testclient import TestClient
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
+
+
+_ACCOUNT_ID_PATTERN = re.compile(r"\b\d{12}\b")
+
+
+def _assert_no_raw_account_ids(value: Any) -> None:
+    if isinstance(value, dict):
+        assert "account_id_raw" not in value
+        for item in value.values():
+            _assert_no_raw_account_ids(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _assert_no_raw_account_ids(item)
+        return
+    if isinstance(value, (str, int)):
+        assert _ACCOUNT_ID_PATTERN.search(str(value)) is None
 
 
 def _fresh_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -224,6 +243,8 @@ def test_zip_export_endpoint_contains_exact_safe_utf8_files(monkeypatch: pytest.
         scan_result = {
             "region": "us-east-1",
             "account_id": "277731792560",
+            "account_id_raw": "277731792560",
+            "debug": {"nested": {"owner_account_id": "277731792560"}},
             "identity_arn": "arn:aws:iam::277731792560:user/budgetbeagle-app",
             "resources": [
                 {"service": "EC2", "id": "i-long-1234567890abcdef0", "state": "running", "type_or_sku": "t3.micro", "metrics": {"low_utilization_candidate": True}},
@@ -296,7 +317,10 @@ def test_zip_export_endpoint_contains_exact_safe_utf8_files(monkeypatch: pytest.
         decoded = {name: archive.read(name).decode("utf-8") for name in archive.namelist()}
 
     joined = "\n".join(decoded.values())
+    report_payload = json.loads(decoded["report.json"])
+    _assert_no_raw_account_ids(report_payload)
     assert "277731792560" not in joined
+    assert "account_id_raw" not in joined
     assert "arn:aws:" not in joined
     assert "AKIA" not in joined
     assert "ASIA" not in joined
@@ -366,3 +390,29 @@ def test_export_payload_normalizes_negative_zero_and_canonical_summary() -> None
     assert "$-0.00" not in serialized
     assert "-$0.00" not in serialized
     assert "-0.00 USD" not in serialized
+
+
+def test_regions_csv_leaves_completed_region_error_columns_blank() -> None:
+    from export import _regions_csv
+
+    payload = {
+        "regional_results": [
+            {
+                "region": "us-east-1",
+                "status": "completed",
+                "resources_discovered": 0,
+                "findings_generated": 0,
+                "warning_count": 0,
+                "error_category": None,
+                "safe_error_message": None,
+                "services_attempted": ["EC2", "S3"],
+                "services_completed": ["EC2", "S3"],
+                "services_failed": [],
+            }
+        ]
+    }
+
+    rows = list(csv.DictReader(io.StringIO(_regions_csv(payload))))
+
+    assert rows[0]["Error Category"] == ""
+    assert rows[0]["Safe Error Message"] == ""

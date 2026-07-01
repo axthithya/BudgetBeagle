@@ -215,6 +215,7 @@ export type RegionScanResult = {
 export type AnalysisResult = {
   schema_version?: string;
   region?: string;
+  legacy_primary_region?: string;
   resource_group?: string | null;
   region_mode?: RegionMode | string;
   requested_regions?: string[];
@@ -231,6 +232,7 @@ export type AnalysisResult = {
     account_id?: string | null;
     identity_arn?: string | null;
     region?: string;
+    legacy_primary_region?: string;
     resource_group?: string | null;
     region_mode?: RegionMode | string;
     requested_regions?: string[];

@@ -129,6 +129,7 @@ async def _run_multi_region(
                         resources=resources,
                         warnings=warnings,
                         errors=errors,
+                        services_attempted=_regional_worker_services(),
                     )
                 )
                 completed_count += 1
@@ -146,6 +147,9 @@ async def _run_multi_region(
                         resources=[],
                         warnings=[warning],
                         errors=[{"service": "Region", "code": exc.__class__.__name__, "message": message, "region": region}],
+                        services_attempted=_regional_worker_services(),
+                        services_completed=[],
+                        services_failed=_regional_worker_services(),
                         error_category=exc.__class__.__name__,
                         safe_error_message=message,
                     )
@@ -189,6 +193,7 @@ async def _run_multi_region(
         resources.extend(s3_scan.get("resources", []))
         warnings.extend(s3_scan.get("warnings", []))
         errors.extend(s3_scan.get("errors", []))
+        _attribute_global_once_service(regional_results, service="S3", scan=s3_scan, regions=request.resolved_regions)
         account_id = account_id or s3_scan.get("account_id")
         account_id_raw = account_id_raw or s3_scan.get("account_id_raw")
         identity_type = identity_type or s3_scan.get("identity_type")
@@ -254,6 +259,59 @@ async def _scan_s3_once(
             "current_service": "S3",
         })
     return await asyncio.to_thread(lambda: scanner.scan_s3_buckets_for_regions(request.resolved_regions))
+
+
+def _regional_worker_services() -> list[str]:
+    return [service for service in supported_scan_services() if service != "S3"]
+
+
+def _attribute_global_once_service(
+    regional_results: list[dict[str, Any]],
+    *,
+    service: str,
+    scan: dict[str, Any],
+    regions: list[str],
+) -> None:
+    failed = _has_service_error(scan, service)
+    selected = set(regions)
+    for result in regional_results:
+        region = str(result.get("region") or "")
+        if selected and region not in selected:
+            continue
+        attempted = result.setdefault("services_attempted", [])
+        completed = result.setdefault("services_completed", [])
+        failed_services = result.setdefault("services_failed", [])
+        _add_unique(attempted, service)
+        if failed:
+            _remove_value(completed, service)
+            _add_unique(failed_services, service)
+            if result.get("status") == "completed":
+                result["status"] = "completed_with_warnings"
+        else:
+            _remove_value(failed_services, service)
+            _add_unique(completed, service)
+
+
+def _has_service_error(scan: dict[str, Any], service: str) -> bool:
+    wanted = _service_key(service)
+    for error in scan.get("errors", []) or []:
+        if _service_key(str(error.get("service") or "")).startswith(wanted):
+            return True
+    return False
+
+
+def _service_key(value: str) -> str:
+    return "".join(char for char in value.upper() if char.isalnum())
+
+
+def _add_unique(values: list[Any], value: str) -> None:
+    if value not in values:
+        values.append(value)
+
+
+def _remove_value(values: list[Any], value: str) -> None:
+    while value in values:
+        values.remove(value)
 
 
 def _new_scanner(scanner_cls: type, region: str, resource_group: str | None, **kwargs: Any) -> Any:

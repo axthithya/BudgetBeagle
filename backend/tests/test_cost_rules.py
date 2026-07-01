@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -604,3 +605,28 @@ def test_s3_absent_lifecycle_recommendation_remains_evidence_first() -> None:
     assert "savings_confidence" not in finding
     assert finding["command"] is None
     assert report["confirmed_issues"] == 0
+
+
+def test_cost_explorer_region_groups_merge_global_aliases() -> None:
+    from billing import _grouped_ytd
+
+    class FakeCostExplorer:
+        def get_cost_and_usage(self, **_: Any) -> dict[str, Any]:
+            return {
+                "ResultsByTime": [
+                    {
+                        "Groups": [
+                            {"Keys": ["NoRegion"], "Metrics": {"UnblendedCost": {"Amount": "1.25"}}},
+                            {"Keys": ["global"], "Metrics": {"UnblendedCost": {"Amount": "2.25"}}},
+                            {"Keys": ["us-east-1"], "Metrics": {"UnblendedCost": {"Amount": "4.00"}}},
+                        ]
+                    }
+                ]
+            }
+
+    rows = _grouped_ytd(FakeCostExplorer(), date(2026, 1, 1), date(2026, 7, 1), "REGION")
+
+    global_rows = [item for item in rows if item["name"] == "Global / No Region"]
+    assert len(global_rows) == 1
+    assert global_rows[0]["amount_usd"] == 3.5
+    assert sum(item["amount_usd"] for item in rows) == 7.5

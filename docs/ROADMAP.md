@@ -24,7 +24,7 @@ BudgetBeagle's goal is to become an open-source, evidence-first AWS FinOps assis
   - Selected-regions and all-enabled-regions scan modes.
   - Structured region discovery with `ec2:DescribeRegions`.
   - Bounded multi-region orchestration and partial regional failure reporting.
-  - Schema v2.1, regional exports, and future recommendation adapter foundation.
+  - Schema v2.1, sanitized regional exports, service telemetry accounting, and future recommendation adapter foundation.
 - 2A.2 AWS-native recommendations: NOT STARTED.
   - Future work may integrate Compute Optimizer and Cost Optimization Hub through the adapter interface.
   - Do not make live AWS-native recommendation calls until Phase 2A.2 is explicitly started.

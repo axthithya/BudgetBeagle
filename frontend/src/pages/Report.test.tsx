@@ -194,6 +194,9 @@ describe("Report Phase 1 manual regression behavior", () => {
     regionalRecord.analysis_result.requested_regions = ["ap-southeast-1", "us-west-2"];
     regionalRecord.analysis_result.resolved_regions = ["ap-southeast-1", "us-west-2"];
     regionalRecord.analysis_result.region_count = 2;
+    regionalRecord.analysis_result.billing.selected_regions = ["ap-southeast-1", "us-west-2"];
+    regionalRecord.analysis_result.billing.selected_region_count = 2;
+    regionalRecord.analysis_result.billing.selected_region_label = "2 selected scan regions";
     regionalRecord.analysis_result.report.status = "completed_with_warnings";
     regionalRecord.analysis_result.regional_results = [
       { region: "ap-southeast-1", status: "completed", resources_discovered: 3, findings_generated: 1, warning_count: 0, warnings: [] },
@@ -206,6 +209,7 @@ describe("Report Phase 1 manual regression behavior", () => {
 
     renderReport();
     expect(await screen.findByRole("heading", { name: "BudgetBeagle Report" })).toBeInTheDocument();
+    expect(screen.getByText(/Region: 2 selected scan regions/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Regional Scan Results" })).toBeInTheDocument();
     expect(screen.getAllByText("us-west-2").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Access denied").length).toBeGreaterThan(0);

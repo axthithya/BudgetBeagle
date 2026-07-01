@@ -259,11 +259,41 @@ def normalize_billing_context(value: Any) -> dict[str, Any]:
                 item["display"] = format_money(amount)
             elif "display" in item:
                 item["display"] = normalize_money_string(item["display"])
-            if item.get("name") == "NoRegion" or item.get("label") == "NoRegion":
-                item["name"] = "Global / No Region"
+            if key == "region_costs_ytd":
+                region_name = _billing_region_name(item.get("name") or item.get("label"))
+                item["name"] = region_name
+                if item.get("label"):
+                    item["label"] = region_name
             rows.append(item)
-        billing[key] = rows
+        billing[key] = _merge_billing_region_rows(rows) if key == "region_costs_ytd" else rows
     return normalize_money_fields(billing)
+
+
+
+def _billing_region_name(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if normalized.lower() in {"noregion", "global", "global / no region"}:
+        return "Global / No Region"
+    return normalized or "Unknown"
+
+
+def _merge_billing_region_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    passthrough: list[dict[str, Any]] = []
+    for item in rows:
+        name = str(item.get("name") or item.get("label") or "").strip()
+        amount = item.get("amount_usd")
+        if not name or not isinstance(amount, (int, float)):
+            passthrough.append(item)
+            continue
+        existing = merged.get(name)
+        if existing is None:
+            merged[name] = item
+            continue
+        total = normalize_money_number(float(existing.get("amount_usd") or 0) + float(amount)) or 0.0
+        existing["amount_usd"] = total
+        existing["display"] = format_money(total)
+    return [*merged.values(), *passthrough]
 
 
 def normalize_money_fields(value: Any) -> Any:
@@ -330,6 +360,7 @@ def _ensure_region_metadata(result: dict[str, Any], *, region: str | None, resou
         mode = "selected_regions"
 
     result["region"] = primary_region or (resolved[0] if resolved else "")
+    result["legacy_primary_region"] = result["region"]
     result["resource_group"] = resource_group if resource_group is not None else result.get("resource_group") or scan.get("resource_group")
     result["region_mode"] = mode
     result["requested_regions"] = requested
@@ -369,6 +400,7 @@ def _ensure_region_metadata(result: dict[str, Any], *, region: str | None, resou
 
     scan.update({
         "region": result["region"],
+        "legacy_primary_region": result["legacy_primary_region"],
         "resource_group": result["resource_group"],
         "region_mode": mode,
         "requested_regions": requested,

@@ -174,5 +174,69 @@ def test_multi_region_orchestrator_partial_failure_s3_once_and_billing_once(monk
     assert all(kwargs.get("include_billing") is False for _, kwargs in scanner_inits)
     assert all(kwargs.get("scan_s3") is False for _, kwargs in scanner_inits)
     assert len(scan_result["resources"]) == 2
+    by_region = {item["region"]: item for item in regional_results}
+    assert by_region["us-east-1"]["services_completed"] == ["EC2", "EBS", "Elastic IP", "Load Balancing", "RDS", "NAT Gateway", "S3"]
+    assert by_region["us-west-2"]["services_completed"] == ["S3"]
+    assert "S3" in by_region["us-west-2"]["services_attempted"]
+    assert "S3" not in by_region["us-west-2"]["services_failed"]
     assert progress == sorted(progress)
     assert max(progress) <= 100
+
+
+def test_build_region_result_marks_zero_resource_services_completed() -> None:
+    from multi_region import build_region_result, supported_scan_services, utc_timestamp
+
+    started = utc_timestamp()
+    result = build_region_result(
+        region="us-east-1",
+        status="completed",
+        started_at=started,
+        finished_at=started,
+        resources=[],
+        warnings=[],
+        errors=[],
+    )
+
+    assert result["status"] == "completed"
+    assert result["resources_discovered"] == 0
+    assert result["services_attempted"] == supported_scan_services()
+    assert result["services_completed"] == supported_scan_services()
+    assert result["services_failed"] == []
+
+
+def test_build_region_result_excludes_failed_services_from_completed() -> None:
+    from multi_region import build_region_result, utc_timestamp
+
+    started = utc_timestamp()
+    result = build_region_result(
+        region="us-east-1",
+        status="completed",
+        started_at=started,
+        finished_at=started,
+        resources=[{"service": "EC2", "id": "i-1"}],
+        errors=[{"service": "rds", "code": "AccessDenied"}],
+        services_attempted=["EC2", "RDS"],
+    )
+
+    assert result["status"] == "completed_with_warnings"
+    assert result["services_completed"] == ["EC2"]
+    assert result["services_failed"] == ["RDS"]
+
+
+def test_build_region_result_all_attempted_services_failed_is_failed() -> None:
+    from multi_region import build_region_result, utc_timestamp
+
+    started = utc_timestamp()
+    result = build_region_result(
+        region="us-east-1",
+        status="completed",
+        started_at=started,
+        finished_at=started,
+        services_attempted=["EC2", "RDS"],
+        services_completed=[],
+        services_failed=["EC2", "RDS"],
+    )
+
+    assert result["status"] == "failed"
+    assert result["services_completed"] == []
+    assert result["services_failed"] == ["EC2", "RDS"]

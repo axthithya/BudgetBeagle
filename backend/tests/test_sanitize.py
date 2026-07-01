@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -212,6 +213,30 @@ class TestSanitizeReport:
         result = sanitize_report(report)
         assert result["scan"]["resources"][0]["metrics"]["lifecycle_status"]["status"] == "present"
         assert "has_lifecycle_policy" not in result["scan"]["resources"][0]["metrics"]
+
+
+    def test_removes_raw_account_id_and_scrubs_nested_identifiers(self) -> None:
+        report = {
+            "scan": {
+                "account_id_raw": "277731792560",
+                "debug": {"nested_account_id": "123456789012"},
+            },
+            "resources": [
+                {
+                    "service": "EC2",
+                    "canonical_resource_id": "resource:277731792560:regional:us-east-1:EC2:instance:i-123",
+                    "notes": ["owned by account 277731792560"],
+                }
+            ],
+        }
+
+        result = sanitize_report(report)
+        serialized = json.dumps(result)
+
+        assert "account_id_raw" not in serialized
+        assert result["scan"]["account_id"] == "********2560"
+        assert "********2560" in result["resources"][0]["canonical_resource_id"]
+        assert re.search(r"\b\d{12}\b", serialized) is None
 
 
 # ── 8. Full API response assertion ──────────────────────────────────────

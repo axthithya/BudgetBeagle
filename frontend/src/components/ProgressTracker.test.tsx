@@ -32,7 +32,7 @@ describe("ProgressTracker accessibility", () => {
     );
     const status = screen.getByRole("status", { name: "Analysis progress" });
     expect(status).toHaveTextContent("Selected regions");
-    expect(status).toHaveTextContent("100%");
+    expect(status).toHaveTextContent("Overall progress: 100%");
     expect(status).toHaveTextContent("Regions: 2/2");
     expect(status).toHaveTextContent("Failed: 1");
     expect(status).toHaveTextContent("Warnings: 1");

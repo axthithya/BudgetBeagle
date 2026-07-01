@@ -178,7 +178,8 @@ export default function Report() {
     return <div className="flex items-center gap-3 text-slate-300" aria-live="polite"><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Analysis running</div>;
   }
 
-  const regionLabel = (result.resolved_regions?.length ?? 0) > 1 ? `${result.resolved_regions?.length} scan regions` : billing.selected_region_label ?? record.region;
+  const regionCount = result.resolved_regions?.length ?? 0;
+  const regionLabel = billing.selected_region_label ?? (regionCount > 1 ? String(regionCount) + " selected scan regions" : record.region);
   const period = billing.period?.label ?? "Current period";
   const scanDate = record.created_at ? formatDateTime(record.created_at) : "Queued";
 
