@@ -17,6 +17,7 @@ BudgetBeagle is read-only by default. It scans and analyzes your AWS account, bu
 - [How To Get A Groq API Key](#how-to-get-a-groq-api-key)
 - [How To Get AWS Access Keys](#how-to-get-aws-access-keys)
 - [How To Use The App](#how-to-use-the-app)
+- [Multi-Region Scanning](#multi-region-scanning)
 - [What The Report Means](#what-the-report-means)
 - [AWS Permissions](#aws-permissions)
 - [Other Ways To Run](#other-ways-to-run)
@@ -43,7 +44,7 @@ The goal is not to blindly delete things. The goal is to give you an evidence-fi
 ```text
 You open the React app
   -> sign up or log in
-  -> choose an AWS region and optional AWS Resource Group
+  -> choose single-region, selected-regions, or all-enabled-regions scanning
   -> FastAPI backend scans AWS with boto3
   -> CloudWatch metrics and optional AWS Cost Explorer billing data are collected where available
   -> deterministic backend rules analyze inventory, metrics, billing, pricing, confidence, and warnings
@@ -58,7 +59,7 @@ The app has two parts:
 | --- | --- |
 | Frontend | React, Vite, TypeScript, Tailwind UI; defaults to `http://localhost:5173` |
 | Backend | FastAPI API; defaults to `http://localhost:8000` |
-| AWS Scanner | Uses `boto3` and your AWS credentials to read inventory, CloudWatch metrics, and optional Cost Explorer billing context |
+| AWS Scanner | Uses `boto3` and your AWS credentials to read regional inventory, CloudWatch metrics, global S3 bucket metadata, and optional Cost Explorer billing context |
 | Cost Analyzer | Uses deterministic rules for findings, savings, confidence, billing summaries, pricing status, warnings, and command templates; optional Groq wording can clarify validated explanations |
 | Database | SQLite by default, with optional Postgres/RDS through `DATABASE_URL` |
 
@@ -67,9 +68,10 @@ More architecture notes are in [Architecture.MD](./Architecture.MD), and the req
 ## Features
 
 - Login and signup with JWT authentication
-- AWS region picker
+- AWS scan mode picker: single region, selected regions, or all enabled regions
+- Searchable selected-region checklist with select all, clear all, retry, and permission-denied states
 - Optional AWS Resource Group scan filter
-- Live progress updates through WebSocket
+- Live progress updates through WebSocket, including per-region progress for multi-region scans
 - Scan history for each signed-in user
 - Saved reports you can reopen later
 - Account-wide and selected-region YTD billing summaries when Cost Explorer is available
@@ -83,7 +85,7 @@ More architecture notes are in [Architecture.MD](./Architecture.MD), and the req
 - Comprehensive Resources table with detailed expandable service properties and metrics
 - Human-readable explanations
 - Copyable `aws` CLI fix commands only when backend validation passes
-- Formatted CSV finding export and canonical JSON history export
+- Formatted CSV/ZIP exports and canonical JSON history export with region metadata
 - Read-only AWS scanning behavior
 - SQLite local database by default
 - Docker option for users who prefer containers
@@ -176,6 +178,7 @@ What each value means:
 | `JWT_SECRET` | Yes | Any long random secret string used to sign local login tokens |
 | `DATABASE_URL` | No for normal local use | Keep SQLite unless you want Postgres |
 | `BUDGETBEAGLE_ENABLE_COST_EXPLORER` | No | Keep `true` to collect account billing context when IAM allows `ce:GetCostAndUsage`; set `false` to skip billing collection |
+| `MULTI_REGION_CONCURRENCY` | No | Bounded worker count for selected-regions and all-enabled-regions scans. Default is `3`; valid range is `1` through `10`. |
 | `BUDGETBEAGLE_BACKEND_PORT` | No | Optional local backend port; the launcher uses the next open port if this one is busy |
 | `BUDGETBEAGLE_FRONTEND_PORT` | No | Optional local frontend port; the launcher opens the actual selected URL |
 
@@ -246,26 +249,50 @@ py run.py
 
 2. Open the frontend URL printed by the launcher if it does not open automatically. It is normally `http://localhost:5173`.
 3. Create an account on the signup page. This is local app authentication, not your AWS account.
-4. Choose an AWS region.
-5. Optionally choose an AWS Resource Group.
-6. Start the scan.
-7. Watch the progress messages.
-8. Open the generated report.
-9. Review every issue, estimated saving, explanation, and fix command.
-10. Copy a command only after you understand what it will do.
+4. Choose a scan mode: Single region, Selected regions, or All enabled regions.
+5. For single-region scans, optionally choose an AWS Resource Group.
+6. For selected-regions scans, search, select, clear, or select all regions from the checklist.
+7. Start the scan.
+8. Watch progress messages and region counts.
+9. Open the generated report.
+10. Review every issue, estimated saving, explanation, failed region, and fix command.
+11. Copy a command only after you understand what it will do.
 
+## Multi-Region Scanning
+
+BudgetBeagle supports three canonical scan modes:
+
+| Mode | Meaning |
+| --- | --- |
+| Single region | Legacy-compatible scan of one AWS region. Optional AWS Resource Group filtering is available in this mode. |
+| Selected regions | Scan exactly the valid regions selected in the dashboard checklist. The backend stores both the submitted list and the deduplicated resolved execution list. |
+| All enabled regions | Resolve enabled AWS regions with read-only `ec2:DescribeRegions`, then scan them in deterministic alphabetical order. |
+
+Multi-region scans use bounded concurrency controlled by `MULTI_REGION_CONCURRENCY`. Global/account APIs are not run once per region: S3 bucket listing and Cost Explorer billing run once per scan, then their data is associated with the relevant regions or global scope.
+
+Partial regional failures stay visible. If at least one region succeeds and another fails, the report completes as `completed_with_warnings` and shows failed-region details, warnings, safe error messages, and regional counts. If every region fails and no useful result exists, the scan is marked `failed`.
+
+Scan regions and Cost Explorer billed regions are different concepts. `requested_regions` and `resolved_regions` describe what BudgetBeagle scanned; `billing.region_costs_ytd` describes AWS billing dimensions returned by Cost Explorer, including `Global / No Region` values.
+
+Old Phase 1 reports still load as legacy `single_region` reports. New reports use schema v2.1 and include `regional_results`, resource/finding region or global scope, and partial failure warnings.
+
+Known limitations for Phase 2A.1:
+
+- AWS Compute Optimizer and Cost Optimization Hub are not called yet.
+- Resource Group filtering remains single-region only.
+- CLI fix commands are examples only; BudgetBeagle never executes them.
 ## What The Report Means
 
 Each report is organized into tabs:
 
 | Report area | Meaning |
 | --- | --- |
-| Overview | Account/region scan summary, confidence score, warning summary, and top-level optimization counts |
+| Overview | Account/region scan summary, regional status, confidence score, warning summary, and top-level optimization counts |
 | Billing | Cost Explorer YTD account total, selected-region spend, monthly account costs, service costs, and billed regions when available |
 | Findings | Deterministic issues, recommendations, and observations with evidence, pricing basis, savings basis, confidence, and action risk |
-| Resources | The scanned AWS inventory with service, resource ID, type, state, and key scalar metrics |
+| Resources | The scanned AWS inventory with service, region or global scope, resource ID, type, state, and key scalar metrics |
 | Commands | Backend-validated `aws` CLI commands only when enough evidence exists and service constraints are satisfied |
-| Warnings | Permission or inspection gaps such as denied lifecycle or Cost Explorer checks |
+| Warnings | Permission, regional failure, or inspection gaps such as denied lifecycle, region discovery, or Cost Explorer checks |
 
 Savings are shown only when the backend has numeric, evidence-backed data. Unknown or unsupported savings are displayed as `Not enough data`. Confidence scores are derived from finding confidence, scan warnings, and whether billing context was available.
 
@@ -273,7 +300,7 @@ Treat the report as a decision aid. For example, an "idle" resource might still 
 
 ## AWS Permissions
 
-BudgetBeagle needs permission to describe and list resources. It does not need write permissions to scan.
+BudgetBeagle needs permission to describe and list resources. It does not need write permissions to scan. Region discovery specifically requires `ec2:DescribeRegions`.
 
 ### Minimal Core Scan Policy
 
@@ -351,7 +378,7 @@ This adds optional permissions that improve report quality. Missing optional per
 | Permission | What it enables | If missing |
 | --- | --- | --- |
 | `s3:GetLifecycleConfiguration` | Verifies whether S3 buckets have lifecycle policies configured | Lifecycle status shows as "Unknown" with a warning |
-| `ce:GetCostAndUsage` | Retrieves AWS Cost Explorer billing data for account and region spend summaries | Billing tab shows "unavailable" with a warning |
+| `ce:GetCostAndUsage` | Retrieves AWS Cost Explorer billing data for account, selected scan-region, service, and billed-region summaries | Billing tab shows "unavailable" with a warning |
 
 ### How to add optional permissions
 
@@ -434,7 +461,7 @@ npm run dev
 | Optional AI wording is missing | Add `GROQ_API_KEY` to `backend/.env` only if you want Groq-generated explanation rewrites. |
 | `JWT_SECRET is not configured` | Replace the placeholder `JWT_SECRET` in `backend/.env` with a long random string. |
 | AWS authentication error | Check `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, region, and IAM permissions. |
-| Region list fails to load | Your AWS credentials may not have `ec2:DescribeRegions`, or the credentials are invalid. |
+| Region list fails to load | Your AWS credentials may not have `ec2:DescribeRegions`, or the credentials are invalid. Single-region scans require a valid region; all-enabled scans require successful discovery. |
 | Port already in use | The launcher now checks `5173` and `8000`, then uses the next open ports and prints the exact URLs. To force a port, set `BUDGETBEAGLE_FRONTEND_PORT` or `BUDGETBEAGLE_BACKEND_PORT` in `backend/.env`. |
 | Groq model error | Check [Groq model documentation](https://console.groq.com/docs/models) and update `GROQ_MODEL` in `backend/.env`. |
 
@@ -447,7 +474,10 @@ BudgetBeagle/
   docker-compose.yml      # Docker backend/frontend setup
   backend/
     main.py               # FastAPI routes, auth, scan jobs, WebSocket progress
-    aws_scanner.py        # boto3 AWS inventory, CloudWatch, and billing scanner
+    aws_scanner.py        # boto3 AWS inventory and CloudWatch scanner
+    region_discovery.py   # enabled region discovery via ec2:DescribeRegions
+    multi_region.py       # scan-mode normalization, identity, dedupe, concurrency
+    scan_orchestrator.py  # bounded multi-region execution and aggregation
     billing.py            # AWS Cost Explorer billing context collector
     cost_rules.py         # deterministic findings, confidence, totals, warnings, and commands
     pricing.py            # AWS Pricing API resolver

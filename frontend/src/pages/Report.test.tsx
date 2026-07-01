@@ -186,4 +186,31 @@ describe("Report Phase 1 manual regression behavior", () => {
     await user.keyboard("{End}");
     await waitFor(() => expect(screen.getByRole("tab", { name: /warnings/i })).toHaveAttribute("aria-selected", "true"));
   });
+  it("renders regional partial-success results and warning regions", async () => {
+    const regionalRecord = JSON.parse(JSON.stringify(canonicalRecord));
+    regionalRecord.status = "completed_with_warnings";
+    regionalRecord.analysis_result.schema_version = "2.1";
+    regionalRecord.analysis_result.region_mode = "selected_regions";
+    regionalRecord.analysis_result.requested_regions = ["ap-southeast-1", "us-west-2"];
+    regionalRecord.analysis_result.resolved_regions = ["ap-southeast-1", "us-west-2"];
+    regionalRecord.analysis_result.region_count = 2;
+    regionalRecord.analysis_result.report.status = "completed_with_warnings";
+    regionalRecord.analysis_result.regional_results = [
+      { region: "ap-southeast-1", status: "completed", resources_discovered: 3, findings_generated: 1, warning_count: 0, warnings: [] },
+      { region: "us-west-2", status: "failed", resources_discovered: 0, findings_generated: 0, warning_count: 1, safe_error_message: "Access denied", warnings: [] },
+    ];
+    regionalRecord.analysis_result.warnings = [
+      { service: "Region", resource_id: "us-west-2", region: "us-west-2", code: "RegionScanFailed", message: "Access denied", resolution: "Retry after checking IAM." },
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ analysis: regionalRecord }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    renderReport();
+    expect(await screen.findByRole("heading", { name: "BudgetBeagle Report" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Regional Scan Results" })).toBeInTheDocument();
+    expect(screen.getAllByText("us-west-2").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Access denied").length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("tab", { name: /warnings/i }));
+    expect(screen.getByText("Region:")).toBeInTheDocument();
+    expect(screen.getByText("Retry after checking IAM.")).toBeInTheDocument();
+  });
 });

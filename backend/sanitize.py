@@ -18,7 +18,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 _ACCOUNT_ID_RE = re.compile(r"\b\d{12}\b")
-_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]+\b")
 _SECRET_KEY_RE = re.compile(r"(?i)(?:secret.?access.?key|aws.?secret)[\"':\s=]+\S+")
 _SESSION_TOKEN_RE = re.compile(r"(?i)(?:session.?token|security.?token)[\"':\s=]+\S+")
 _ARN_RE = re.compile(r"arn:aws[a-z-]*:[a-z0-9-]+:(?:[a-z0-9-]*:\d{12}|::\d{12}):[^\s\"',\]]+")

@@ -8,6 +8,7 @@ export type AuthResponse = {
 export type ScanWarning = {
   service: string;
   resource_id?: string | null;
+  region?: string | null;
   code?: string;
   message: string;
   permission?: string;
@@ -39,6 +40,8 @@ export type BillingContext = {
   source?: string;
   account_id?: string | null;
   selected_region?: string;
+  selected_regions?: string[];
+  selected_region_count?: number;
   selected_region_label?: string;
   period?: { label?: string; start?: string; end?: string; end_exclusive?: boolean };
   account_total_ytd_usd?: number | null;
@@ -109,6 +112,9 @@ export type Issue = {
   category?: "confirmed_issue" | "recommendation" | "observation" | "Confirmed issue" | "Recommendation" | "Observation" | string;
   category_label?: string;
   service?: string;
+  region?: string;
+  scope?: string;
+  source?: string;
   resource_id: string;
   issue_type: string;
   severity: "high" | "medium" | "low" | string;
@@ -190,16 +196,46 @@ export type ServiceCoverage = {
   has_resources?: boolean;
 };
 
+export type RegionMode = "single_region" | "selected_regions" | "all_enabled_regions";
+
+export type RegionScanResult = {
+  region: string;
+  status: "completed" | "completed_with_warnings" | "failed" | "skipped" | string;
+  resources_discovered?: number;
+  findings_generated?: number;
+  warning_count?: number;
+  warnings?: ScanWarning[];
+  error_category?: string | null;
+  safe_error_message?: string | null;
+  services_attempted?: string[];
+  services_completed?: string[];
+  services_failed?: string[];
+};
+
 export type AnalysisResult = {
   schema_version?: string;
   region?: string;
   resource_group?: string | null;
+  region_mode?: RegionMode | string;
+  requested_regions?: string[];
+  resolved_regions?: string[];
+  region_count?: number;
+  regional_results?: RegionScanResult[];
+  partial_failure_warnings?: ScanWarning[];
+  regional_resources?: unknown[];
+  global_resources?: unknown[];
+  regional_findings?: Issue[];
+  global_findings?: Issue[];
   report: AnalysisReportSummary;
   scan: {
     account_id?: string | null;
     identity_arn?: string | null;
     region?: string;
     resource_group?: string | null;
+    region_mode?: RegionMode | string;
+    requested_regions?: string[];
+    resolved_regions?: string[];
+    regional_results?: RegionScanResult[];
     errors?: { service: string; code: string; message: string }[];
     warnings?: ScanWarning[];
     billing?: BillingContext;

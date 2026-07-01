@@ -16,6 +16,20 @@ from starlette.concurrency import run_in_threadpool
 from ai_analyzer import analyze_costs
 from auth import create_access_token, get_current_user, get_user_from_token, hash_password, verify_password
 from aws_scanner import AwsScanner, ScannerAuthError, ScannerError, ScannerRegionError
+from multi_region import (
+    ConcurrencyConfigurationError,
+    NormalizedScanRequest,
+    RegionResolutionError,
+    apply_multi_region_metadata,
+    build_region_result,
+    deduplicate_findings,
+    deduplicate_resources,
+    normalize_scan_request,
+    service_coverage_for_aggregate,
+    utc_timestamp,
+)
+from region_discovery import discover_enabled_regions
+from scan_orchestrator import run_scan_request
 from db import (
     Analysis,
     SessionLocal,
@@ -31,7 +45,7 @@ from db import (
     serialize_analysis,
 )
 from progress import ProgressManager
-from report_schema import build_canonical_result, normalize_analysis_result
+from report_schema import SCHEMA_VERSION, build_canonical_result, normalize_analysis_result
 from sanitize import mask_account_id, mask_arn, parse_identity, sanitize_report
 from export import generate_zip_export
 
@@ -57,9 +71,10 @@ app.add_middleware(
 
 
 class AnalyzeRequest(BaseModel):
-    region: str = Field(..., min_length=3)
+    region: str | None = Field(None, min_length=3)
     resource_group: str | None = None
-
+    region_mode: str | None = None
+    requested_regions: list[str] = Field(default_factory=list)
 
 class AuthRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=255)
@@ -103,13 +118,8 @@ def login(payload: AuthRequest, db: Session = Depends(get_db)) -> dict[str, Any]
 
 
 @app.get("/api/regions")
-def regions(_: User = Depends(get_current_user)) -> dict[str, list[str]]:
-    try:
-        return {"regions": AwsScanner.enabled_regions()}
-    except ScannerAuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-    except ScannerError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+def regions(_: User = Depends(get_current_user)) -> dict[str, Any]:
+    return discover_enabled_regions().as_api_response()
 
 
 # ── Core vs optional permissions ─────────────────────────────────────────
@@ -249,14 +259,34 @@ async def analyze(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    analysis = create_analysis(db, current_user.id, payload.region, payload.resource_group)
-    asyncio.create_task(run_analysis_job(analysis.id, current_user.id, payload.region, payload.resource_group))
+    try:
+        scan_request = normalize_scan_request(
+            region=payload.region,
+            resource_group=payload.resource_group,
+            region_mode=payload.region_mode,
+            requested_regions=payload.requested_regions,
+        )
+    except RegionResolutionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+    analysis = create_analysis(db, current_user.id, scan_request.display_region, payload.resource_group)
+    asyncio.create_task(
+        run_analysis_job(
+            analysis.id,
+            current_user.id,
+            scan_request.primary_region,
+            payload.resource_group,
+            region_mode=scan_request.region_mode,
+            requested_regions=scan_request.requested_regions,
+            resolved_regions=scan_request.resolved_regions,
+        )
+    )
     return {
         "analysis_id": analysis.id,
         "status": analysis.status,
         "websocket_url": f"/ws/progress/{analysis.id}",
+        **scan_request.as_dict(),
     }
-
 
 @app.get("/api/history")
 def history(
@@ -348,7 +378,16 @@ async def websocket_progress(websocket: WebSocket, analysis_id: int) -> None:
         progress_manager.disconnect(analysis_id, websocket)
 
 
-async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource_group: str | None) -> None:
+async def run_analysis_job(
+    analysis_id: int,
+    user_id: int,
+    region: str,
+    resource_group: str | None,
+    *,
+    region_mode: str | None = None,
+    requested_regions: list[str] | None = None,
+    resolved_regions: list[str] | None = None,
+) -> None:
     db = SessionLocal()
     try:
         analysis = db.get(Analysis, analysis_id)
@@ -357,6 +396,7 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
             return
         if analysis.status == "cancelled":
             return
+        scan_request = _job_scan_request(region, resource_group, region_mode, requested_regions, resolved_regions)
         analysis.status = "running"
         db.commit()
 
@@ -376,19 +416,65 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
 
         if await stop_if_cancelled("before_scan"):
             return
-        await progress_manager.publish(analysis_id, f"Scanning AWS resources in {region}...", status="running", details={"stage": "scan"})
-        await progress_manager.publish(analysis_id, "Pulling CloudWatch metrics...", status="running", details={"stage": "metrics"})
-        scan_result = await run_in_threadpool(lambda: AwsScanner(region, resource_group).scan())
+
+        if scan_request.is_multi_region:
+            await progress_manager.publish(
+                analysis_id,
+                f"Scanning AWS resources across {len(scan_request.resolved_regions)} regions...",
+                status="running",
+                details=_progress_details(scan_request, stage="scan", overall_percentage=5),
+            )
+
+            async def publish_progress(message: str, details: dict[str, Any]) -> None:
+                await progress_manager.publish(analysis_id, message, status="running", details=_progress_details(scan_request, **details))
+
+            scan_result, regional_results, partial_warnings = await run_scan_request(
+                scan_request,
+                scanner_cls=AwsScanner,
+                publish_progress=publish_progress,
+                is_cancelled=stop_if_cancelled,
+            )
+            scan_for_analysis = scan_result
+        else:
+            started_at = utc_timestamp()
+            await progress_manager.publish(analysis_id, f"Scanning AWS resources in {scan_request.primary_region}...", status="running", details={"stage": "scan"})
+            await progress_manager.publish(analysis_id, "Pulling CloudWatch metrics...", status="running", details={"stage": "metrics"})
+            scan_result = await run_in_threadpool(lambda: AwsScanner(scan_request.primary_region, resource_group).scan())
+            finished_at = utc_timestamp()
+            regional_results = [
+                build_region_result(
+                    region=scan_request.primary_region,
+                    status="completed_with_warnings" if scan_result.get("warnings") or scan_result.get("errors") else "completed",
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    resources=scan_result.get("resources", []),
+                    warnings=scan_result.get("warnings", []),
+                    errors=scan_result.get("errors", []),
+                )
+            ]
+            partial_warnings = []
+            scan_for_analysis = scan_result
 
         if await stop_if_cancelled("after_scan"):
             return
-        await progress_manager.publish(analysis_id, "Building deterministic cost report...", status="running", details={"stage": "analysis"})
-        ai_analysis = await run_in_threadpool(lambda: analyze_costs(scan_result))
+        await progress_manager.publish(
+            analysis_id,
+            "Building deterministic cost report...",
+            status="running",
+            details=_progress_details(scan_request, stage="analysis", overall_percentage=88),
+        )
+        ai_analysis = await run_in_threadpool(lambda: analyze_costs(scan_for_analysis))
 
         if await stop_if_cancelled("after_analysis"):
             return
-        await progress_manager.publish(analysis_id, "Storing results...", status="running", details={"stage": "storage"})
-        result = build_canonical_result(region=region, resource_group=resource_group, scan_result=scan_result, analysis=ai_analysis)
+        await progress_manager.publish(
+            analysis_id,
+            "Storing results...",
+            status="running",
+            details=_progress_details(scan_request, stage="storage", overall_percentage=96),
+        )
+        result = build_canonical_result(region=scan_request.primary_region, resource_group=resource_group, scan_result=scan_result, analysis=ai_analysis)
+        result = _finalize_scan_result(result, scan_request, regional_results, partial_warnings)
 
         if await stop_if_cancelled("before_storage"):
             return
@@ -403,8 +489,24 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
             estimated_savings=str(savings_display),
             status=final_status,
         )
-        await progress_manager.publish(analysis_id, "Analysis complete", event="completed", status=final_status, terminal=True)
-    except (ScannerAuthError, ScannerRegionError, ScannerError, RuntimeError) as exc:
+        await progress_manager.publish(
+            analysis_id,
+            "Analysis complete" if final_status != "failed" else "Analysis failed",
+            event="completed" if final_status != "failed" else "failed",
+            status=final_status,
+            terminal=True,
+            details=_progress_details(scan_request, stage="complete", overall_percentage=100),
+        )
+    except (ScannerAuthError, ScannerRegionError, ScannerError, ConcurrencyConfigurationError) as exc:
+        fail_analysis(db, analysis_id, str(exc))
+        await progress_manager.publish(analysis_id, f"Analysis failed: {exc}", event="failed", status="failed", terminal=True, details={"reason": str(exc)})
+    except RegionResolutionError as exc:
+        fail_analysis(db, analysis_id, str(exc))
+        await progress_manager.publish(analysis_id, f"Analysis failed: {exc}", event="failed", status="failed", terminal=True, details={"reason": str(exc), "code": exc.code})
+    except RuntimeError as exc:
+        db.refresh(analysis)
+        if analysis.status == "cancelled":
+            return
         fail_analysis(db, analysis_id, str(exc))
         await progress_manager.publish(analysis_id, f"Analysis failed: {exc}", event="failed", status="failed", terminal=True, details={"reason": str(exc)})
     except Exception as exc:
@@ -413,6 +515,61 @@ async def run_analysis_job(analysis_id: int, user_id: int, region: str, resource
     finally:
         db.close()
 
+
+def _job_scan_request(
+    region: str,
+    resource_group: str | None,
+    region_mode: str | None,
+    requested_regions: list[str] | None,
+    resolved_regions: list[str] | None,
+) -> NormalizedScanRequest:
+    if region_mode and resolved_regions:
+        return NormalizedScanRequest(
+            region_mode=region_mode,
+            requested_regions=requested_regions or ([region] if region_mode == "single_region" else []),
+            resolved_regions=resolved_regions,
+            resource_group=resource_group,
+        )
+    return normalize_scan_request(region=region, resource_group=resource_group, region_mode=region_mode, requested_regions=requested_regions)
+
+
+def _finalize_scan_result(
+    result: dict[str, Any],
+    scan_request: NormalizedScanRequest,
+    regional_results: list[dict[str, Any]],
+    partial_warnings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    scan = result.get("scan", {}) if isinstance(result.get("scan"), dict) else {}
+    account_id = scan.get("account_id") or (result.get("billing", {}) if isinstance(result.get("billing"), dict) else {}).get("account_id")
+    resources = deduplicate_resources(result.get("resources", []), account_id=account_id)
+    findings = deduplicate_findings(result.get("findings", []), account_id=account_id, resources=resources)
+    result["resources"] = resources
+    result["findings"] = findings
+    warnings = result.get("warnings", []) if isinstance(result.get("warnings"), list) else []
+    errors = scan.get("errors", []) if isinstance(scan.get("errors"), list) else []
+    result["service_coverage"] = service_coverage_for_aggregate(resources, warnings, errors)
+    return apply_multi_region_metadata(
+        result,
+        request=scan_request,
+        regional_results=regional_results,
+        partial_failure_warnings=partial_warnings,
+    )
+
+
+def _progress_details(scan_request: NormalizedScanRequest, **details: Any) -> dict[str, Any]:
+    payload = {
+        "region_mode": scan_request.region_mode,
+        "requested_regions": scan_request.requested_regions,
+        "resolved_regions": scan_request.resolved_regions,
+        "total_region_count": len(scan_request.resolved_regions),
+        "completed_region_count": details.pop("completed_region_count", 0),
+        "failed_region_count": details.pop("failed_region_count", 0),
+        "active_regions": details.pop("active_regions", []),
+        "cancellation_state": "not_cancelled",
+        "overall_percentage": min(max(int(details.pop("overall_percentage", 0)), 0), 100),
+    }
+    payload.update(details)
+    return payload
 
 def _auth_response(user: User) -> dict[str, Any]:
     return {
@@ -440,5 +597,5 @@ def _safe_serialize(analysis: Analysis) -> dict[str, Any]:
     data["observations"] = int(report.get("observations") or 0)
     data["actionable_findings"] = int(report.get("actionable_findings") or data["confirmed_issues"] + data["recommendations"])
     data["service_coverage_summary"] = report.get("service_coverage_summary", {})
-    data["schema_version"] = "2.0"
+    data["schema_version"] = SCHEMA_VERSION
     return data

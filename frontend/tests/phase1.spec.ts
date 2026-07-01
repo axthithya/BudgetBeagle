@@ -125,9 +125,29 @@ const mockRecord = {
   },
 };
 
+function makePartialRegionalRecord() {
+  const record = JSON.parse(JSON.stringify(mockRecord));
+  record.status = "completed_with_warnings";
+  record.analysis_result.schema_version = "2.1";
+  record.analysis_result.region_mode = "selected_regions";
+  record.analysis_result.requested_regions = ["ap-southeast-1", "us-west-2"];
+  record.analysis_result.resolved_regions = ["ap-southeast-1", "us-west-2"];
+  record.analysis_result.region_count = 2;
+  record.analysis_result.report.status = "completed_with_warnings";
+  record.analysis_result.report.warnings_count = 1;
+  record.analysis_result.regional_results = [
+    { region: "ap-southeast-1", status: "completed", resources_discovered: 3, findings_generated: 1, warning_count: 0, warnings: [] },
+    { region: "us-west-2", status: "failed", resources_discovered: 0, findings_generated: 0, warning_count: 1, safe_error_message: "Access denied", warnings: [] },
+  ];
+  record.analysis_result.warnings = [
+    { service: "Region", resource_id: "us-west-2", region: "us-west-2", code: "RegionScanFailed", message: "Access denied", resolution: "Retry after checking IAM." },
+  ];
+  record.analysis_result.partial_failure_warnings = record.analysis_result.warnings;
+  return record;
+}
 type ApiCounts = Record<string, number>;
 
-async function mockApi(page: import("@playwright/test").Page, counts: ApiCounts = {}) {
+async function mockApi(page: import("@playwright/test").Page, counts: ApiCounts = {}, options: { analysisRecord?: unknown; regions?: string[] } = {}) {
   await page.addInitScript(() => {
     localStorage.setItem("token", "test-token");
     localStorage.setItem("user", JSON.stringify({ id: 7, email: "phase1@example.com" }));
@@ -140,15 +160,15 @@ async function mockApi(page: import("@playwright/test").Page, counts: ApiCounts 
     expect(request.headers().authorization, `${url.pathname} auth header`).toBe("Bearer test-token");
 
     if (key === "/api/analyses/42") {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ analysis: mockRecord }) });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ analysis: options.analysisRecord ?? mockRecord }) });
       return;
     }
     if (key === "/api/history") {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ analyses: [mockRecord] }) });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ analyses: [options.analysisRecord ?? mockRecord] }) });
       return;
     }
     if (key === "/api/regions") {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ regions: ["ap-southeast-1"] }) });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "available", regions: options.regions ?? ["ap-southeast-1", "us-east-1", "us-west-2"] }) });
       return;
     }
     if (key === "/api/aws/status") {
@@ -233,6 +253,59 @@ for (const viewport of viewports) {
     await expectNoPageHorizontalScroll(page);
   });
 }
+
+
+test("dashboard multi-region controls are responsive, keyboard accessible, and axe-clean", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 667 });
+  await mockApi(page);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Run Analysis" })).toBeVisible();
+
+  await page.getByRole("radio", { name: "Selected regions" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Selected regions" })).toBeVisible();
+  await expect(page.getByText("1 selected")).toBeVisible();
+
+  await page.getByRole("button", { name: "Select all" }).click();
+  await expect(page.getByText("3 selected")).toBeVisible();
+  await page.getByRole("textbox", { name: "Filter regions" }).fill("west");
+  await expect(page.getByRole("checkbox", { name: "us-west-2" })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: "ap-southeast-1" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Clear all" }).click();
+  await expect(page.getByRole("button", { name: "Run Analysis" })).toBeDisabled();
+  await page.getByRole("checkbox", { name: "us-west-2" }).check();
+  await expect(page.getByText("1 selected")).toBeVisible();
+
+  await page.getByRole("radio", { name: "All enabled regions" }).click();
+  await expect(page.getByText("3 regions resolved by AWS region discovery")).toBeVisible();
+  await expectNoPageHorizontalScroll(page);
+
+  await page.addScriptTag({ path: require.resolve("axe-core/axe.min.js") });
+  const violations = await page.evaluate(async () => {
+    // @ts-expect-error axe is injected by the test.
+    const results = await window.axe.run(document);
+    return results.violations.map((violation: { id: string; impact: string | null; nodes: unknown[] }) => ({
+      id: violation.id,
+      impact: violation.impact,
+      nodes: violation.nodes.length,
+    }));
+  });
+  expect(violations).toEqual([]);
+});
+
+test("partial-success report shows failed regional result and warning recovery text", async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await mockApi(page, {}, { analysisRecord: makePartialRegionalRecord() });
+  await page.goto("/report/42");
+
+  await expect(page.getByRole("heading", { name: "Regional Scan Results" })).toBeVisible();
+  await expect(page.getByText("us-west-2").first()).toBeVisible();
+  await expect(page.getByText("Access denied").first()).toBeVisible();
+  await page.getByRole("tab", { name: "Warnings" }).click();
+  await expect(page.getByText("Retry after checking IAM.")).toBeVisible();
+  await expectNoPageHorizontalScroll(page);
+});
 
 test("accessible tabs, focus states, reduced motion, and axe scan", async ({ page }) => {
   await page.setViewportSize({ width: 768, height: 1024 });

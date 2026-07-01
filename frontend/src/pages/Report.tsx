@@ -23,7 +23,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
-import { AnalysisRecord, AnalysisResult, BillingAmount, BillingContext, Issue, ReportConfidence, ScanWarning, ServiceCoverage, apiFetch, apiFetchBlob } from "../lib/api";
+import { AnalysisRecord, AnalysisResult, BillingAmount, BillingContext, Issue, ReportConfidence, ScanWarning, ServiceCoverage, RegionScanResult, apiFetch, apiFetchBlob } from "../lib/api";
 import { isTerminalAnalysisStatus } from "../lib/analysisStatus";
 import { formatMonthlySavings, formatStatus, formatMoney, formatDateTime, formatShortDate, formatDuration, humanLabel, humanizeMetricName, formatBytes } from "../lib/format";
 
@@ -42,7 +42,7 @@ const tabs: { key: TabKey; label: string; icon: typeof BarChart3 }[] = [
 ];
 
 // -- Schema version -----------------------------------------------------
-const SCHEMA_VERSION = "2.0";
+const SCHEMA_VERSION = "2.1";
 
 export default function Report() {
   const { analysisId } = useParams();
@@ -178,7 +178,7 @@ export default function Report() {
     return <div className="flex items-center gap-3 text-slate-300" aria-live="polite"><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Analysis running</div>;
   }
 
-  const regionLabel = billing.selected_region_label ?? record.region;
+  const regionLabel = (result.resolved_regions?.length ?? 0) > 1 ? `${result.resolved_regions?.length} scan regions` : billing.selected_region_label ?? record.region;
   const period = billing.period?.label ?? "Current period";
   const scanDate = record.created_at ? formatDateTime(record.created_at) : "Queued";
 
@@ -250,7 +250,8 @@ export default function Report() {
 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
           <Metric label="Account Total" sublabel="YTD global" value={formatMoney(metrics.account_total_ytd_display ?? billing.account_total_ytd_usd)} />
-          <Metric label="Regional Spend" sublabel={record.region} value={formatMoney(metrics.selected_region_ytd_display ?? billing.selected_region_ytd_usd)} />
+          <Metric label="Regional Spend" sublabel={regionLabel} value={formatMoney(metrics.selected_region_ytd_display ?? billing.selected_region_ytd_usd)} />
+          <Metric label="Regions" sublabel={result.region_mode ?? "single_region"} value={String(result.resolved_regions?.length ?? 1)} />
           <Metric label="Resources" sublabel="Discovered" value={String(coverageStats.resourcesDiscovered)} />
           <Metric label="Confirmed Issues" sublabel="confirmed_issue only" value={String(confirmedIssues)} tone={confirmedIssues > 0 ? "rose" : "slate"} />
           <Metric label="Recommendations" sublabel="Actionable review" value={String(recommendations)} tone={recommendations > 0 ? "rose" : "slate"} />
@@ -339,6 +340,7 @@ function OverviewTab({ result, billing, warnings, confidence, savingsConfidence,
       ))}
 
       {warnings.length > 0 && <WarningSummary warnings={warnings} />}
+      {Boolean(result.regional_results?.length) && <RegionResultsSection regions={result.regional_results ?? []} />}
 
       <section className="rounded-lg border border-cloud-line bg-cloud-panel p-5">
         <div className="flex items-center gap-2 text-white">
@@ -369,6 +371,35 @@ function OverviewTab({ result, billing, warnings, confidence, savingsConfidence,
   );
 }
 
+function RegionResultsSection({ regions }: { regions: RegionScanResult[] }) {
+  const failed = regions.filter((item) => item.status === "failed").length;
+  return (
+    <section className="rounded-lg border border-cloud-line bg-cloud-panel p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Regional Scan Results</h2>
+          <p className="mt-1 text-sm text-slate-400">{regions.length} region{regions.length !== 1 ? "s" : ""} resolved - {failed} failed</p>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {regions.map((item) => (
+          <div key={item.region} className="rounded-lg border border-cloud-line bg-cloud-ink p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-medium text-white">{item.region}</p>
+              <StatusBadge value={item.status} />
+            </div>
+            <div className="mt-3 grid gap-1 text-sm text-slate-400">
+              <span>Resources: {item.resources_discovered ?? 0}</span>
+              <span>Findings: {item.findings_generated ?? 0}</span>
+              <span>Warnings: {item.warning_count ?? item.warnings?.length ?? 0}</span>
+            </div>
+            {item.safe_error_message && <p className="mt-3 text-sm leading-6 text-amber-100">{item.safe_error_message}</p>}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 // -- Billing Tab --------------------------------------------------------
 
 function BillingTab({ billing, showZero, onShowZeroChange }: { billing: BillingContext; showZero: boolean; onShowZeroChange: (value: boolean) => void }) {
@@ -483,6 +514,7 @@ function ResourcesTab({ resources, copied, onCopy }: { resources: unknown[]; cop
             <tr>
               <th scope="col" className="px-4 py-3">Service</th>
               <th scope="col" className="px-4 py-3">Resource</th>
+              <th scope="col" className="px-4 py-3">Region</th>
               <th scope="col" className="px-4 py-3">Type</th>
               <th scope="col" className="px-4 py-3">State</th>
               <th scope="col" className="px-4 py-3">Details</th>
@@ -561,7 +593,8 @@ function ResourcesTab({ resources, copied, onCopy }: { resources: unknown[]; cop
                 </div>
                 <Badge label={item.state} tone="slate" />
               </div>
-              <p className="mt-2 text-sm text-slate-400">Type: {item.type}</p>
+              <p className="mt-2 text-sm text-slate-400">Region: {item.region}</p>
+              <p className="mt-1 text-sm text-slate-400">Type: {item.type}</p>
               <button
                 type="button"
                 onClick={() => setExpandedId(isExpanded ? null : `${item.id}-${index}`)}
@@ -656,7 +689,7 @@ function FindingCard({ issue, copied, onCopy }: { issue: Issue; copied: string |
             {savingsConfidence && <Badge label={`${savingsConfidence.label} savings confidence`} tone="cyan" />}
           </div>
           <h2 className="mt-3 text-lg font-semibold text-white">{issue.issue_type}</h2>
-          <p className="mt-1 break-all text-sm text-slate-400">{issue.service ?? "AWS"} / {issue.resource_id}</p>
+          <p className="mt-1 break-all text-sm text-slate-400">{issue.region ?? issue.scope ?? "Unknown region"} / {issue.service ?? "AWS"} / {issue.resource_id}</p>
         </div>
         <div className="text-left sm:text-right">
           <p className="text-sm text-slate-500">Savings</p>
@@ -724,6 +757,12 @@ function WarningCard({ warning, copied, onCopy }: { warning: ScanWarning; copied
   return (
     <div className="rounded-lg border border-amber-400/20 bg-amber-500/5 p-4">
       <h3 className="font-semibold text-white">{warning.title ?? `${warning.service} check unavailable`}</h3>
+      {warning.region && (
+        <div className="mt-2 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
+          <span className="text-amber-200/70">Region:</span>
+          <span className="break-all text-white">{warning.region}</span>
+        </div>
+      )}
       {warning.resource_id && (
         <div className="mt-2 grid gap-1 text-sm sm:grid-cols-[140px_1fr]">
           <span className="text-amber-200/70">Resource:</span>
@@ -1200,6 +1239,7 @@ function normalizeResource(resource: unknown) {
   return {
     service: String(item.service ?? "AWS"),
     id: String(item.id ?? "unknown"),
+    region: String(item.region ?? item.scope ?? "Unknown"),
     type: String(item.type_or_sku ?? "-"),
     state: String(item.state ?? "-"),
     metricRows,

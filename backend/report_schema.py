@@ -4,6 +4,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
+SCHEMA_VERSION = "2.1"
 SUPPORTED_SERVICES = ["EC2", "EBS", "S3", "RDS", "Load Balancing", "Elastic IP", "NAT Gateway"]
 SCANNED_SERVICE_STATUSES = {"completed", "completed_with_warnings", "no_resources"}
 
@@ -59,7 +60,7 @@ def build_canonical_result(
     }
 
     result = {
-        "schema_version": "2.0",
+        "schema_version": SCHEMA_VERSION,
         "report": report,
         "scan": _scan_metadata(scan, region, resource_group),
         "billing": billing,
@@ -75,7 +76,7 @@ def build_canonical_result(
             "notes": deterministic.get("notes", []),
         },
     }
-    return normalize_money_fields(result)
+    return normalize_money_fields(_ensure_region_metadata(result, region=region, resource_group=resource_group))
 
 
 def normalize_analysis_result(raw: dict[str, Any], *, region: str | None = None, resource_group: str | None = None) -> dict[str, Any]:
@@ -86,7 +87,7 @@ def normalize_analysis_result(raw: dict[str, Any], *, region: str | None = None,
         return data
     if "report" in data and "resources" in data and "findings" in data:
         canonical = deepcopy(data)
-        canonical.setdefault("schema_version", "2.0")
+        canonical["schema_version"] = SCHEMA_VERSION
         canonical.setdefault("warnings", [])
         canonical.setdefault("billing", {})
         canonical.setdefault("metrics", {})
@@ -110,7 +111,7 @@ def normalize_analysis_result(raw: dict[str, Any], *, region: str | None = None,
         report["service_coverage_summary"] = coverage_summary(canonical["service_coverage"])
         canonical.setdefault("ai_enrichment", {"status": canonical.pop("ai_enrichment_status", "none"), "notes": []})
         canonical.pop("issues", None)
-        return normalize_money_fields(canonical)
+        return normalize_money_fields(_ensure_region_metadata(canonical, region=region, resource_group=resource_group))
 
     scan = data.get("scan") if isinstance(data.get("scan"), dict) else {}
     analysis = data.get("analysis") if isinstance(data.get("analysis"), dict) else data
@@ -309,6 +310,106 @@ def format_monthly_savings(value: Any) -> str:
         return "Not enough data"
     return f"${numeric:.2f}/month"
 
+
+def _ensure_region_metadata(result: dict[str, Any], *, region: str | None, resource_group: str | None) -> dict[str, Any]:
+    scan = result.setdefault("scan", {})
+    if not isinstance(scan, dict):
+        scan = {}
+        result["scan"] = scan
+    primary_region = str(result.get("region") or scan.get("region") or region or "").strip()
+    mode = str(result.get("region_mode") or scan.get("region_mode") or "single_region")
+    resolved = _string_list(result.get("resolved_regions") or scan.get("resolved_regions"))
+    if not resolved and primary_region:
+        resolved = [primary_region]
+    requested = _string_list(result.get("requested_regions") or scan.get("requested_regions")) or list(resolved)
+    if not resolved and requested:
+        resolved = list(requested)
+    if mode not in {"single_region", "selected_regions", "all_enabled_regions"}:
+        mode = "single_region"
+    if mode == "single_region" and len(resolved) > 1:
+        mode = "selected_regions"
+
+    result["region"] = primary_region or (resolved[0] if resolved else "")
+    result["resource_group"] = resource_group if resource_group is not None else result.get("resource_group") or scan.get("resource_group")
+    result["region_mode"] = mode
+    result["requested_regions"] = requested
+    result["resolved_regions"] = resolved
+    result["region_count"] = len(resolved)
+
+    resources = result.get("resources") if isinstance(result.get("resources"), list) else []
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    for resource in resources:
+        if isinstance(resource, dict):
+            resource.setdefault("scope", "regional")
+            if resolved and resource.get("scope") != "global":
+                resource.setdefault("region", result["region"] or resolved[0])
+    resource_region_by_id = {
+        str(resource.get("id") or resource.get("resource_id") or ""): resource.get("region")
+        for resource in resources
+        if isinstance(resource, dict)
+    }
+    for finding in findings:
+        if isinstance(finding, dict):
+            finding.setdefault("source", "budgetbeagle_rule")
+            finding.setdefault("scope", "regional")
+            rid = str(finding.get("resource_id") or "")
+            if resolved and finding.get("scope") != "global":
+                finding.setdefault("region", resource_region_by_id.get(rid) or result["region"] or resolved[0])
+
+    regional_results = result.get("regional_results") or scan.get("regional_results") or []
+    if not isinstance(regional_results, list) or not regional_results:
+        regional_results = [_legacy_region_result(region_name, resources, findings, result.get("warnings", [])) for region_name in (resolved or [result["region"]]) if region_name]
+    partial_warnings = result.get("partial_failure_warnings") or scan.get("partial_failure_warnings") or []
+    result["regional_results"] = regional_results
+    result["partial_failure_warnings"] = partial_warnings if isinstance(partial_warnings, list) else []
+    result["regional_resources"] = [resource for resource in resources if isinstance(resource, dict) and resource.get("scope") != "global"]
+    result["global_resources"] = [resource for resource in resources if isinstance(resource, dict) and resource.get("scope") == "global"]
+    result["regional_findings"] = [finding for finding in findings if isinstance(finding, dict) and finding.get("scope") != "global"]
+    result["global_findings"] = [finding for finding in findings if isinstance(finding, dict) and finding.get("scope") == "global"]
+
+    scan.update({
+        "region": result["region"],
+        "resource_group": result["resource_group"],
+        "region_mode": mode,
+        "requested_regions": requested,
+        "resolved_regions": resolved,
+        "regional_results": regional_results,
+        "partial_failure_warnings": result["partial_failure_warnings"],
+    })
+    report = result.setdefault("report", {})
+    if isinstance(report, dict):
+        report.setdefault("region_count", len(resolved))
+        report.setdefault("regions_completed", sum(1 for item in regional_results if isinstance(item, dict) and item.get("status") in {"completed", "completed_with_warnings"}))
+        report.setdefault("regions_failed", sum(1 for item in regional_results if isinstance(item, dict) and item.get("status") == "failed"))
+    return result
+
+
+def _legacy_region_result(region: str, resources: list[Any], findings: list[Any], warnings: list[Any]) -> dict[str, Any]:
+    resource_count = sum(1 for item in resources if isinstance(item, dict) and str(item.get("region") or region) == region)
+    finding_count = sum(1 for item in findings if isinstance(item, dict) and str(item.get("region") or region) == region)
+    warning_items = [item for item in warnings if isinstance(item, dict) and str(item.get("region") or region) == region]
+    return {
+        "region": region,
+        "status": "completed_with_warnings" if warning_items else "completed",
+        "started_at": None,
+        "finished_at": None,
+        "elapsed_ms": 0,
+        "resources_discovered": resource_count,
+        "findings_generated": finding_count,
+        "warnings": warning_items,
+        "warning_count": len(warning_items),
+        "error_category": None,
+        "safe_error_message": None,
+        "services_attempted": SUPPORTED_SERVICES,
+        "services_completed": SUPPORTED_SERVICES,
+        "services_failed": [],
+    }
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
 
 def _normalize_finding(finding: Any) -> dict[str, Any]:
     item = deepcopy(finding) if isinstance(finding, dict) else {}

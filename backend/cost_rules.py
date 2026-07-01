@@ -147,6 +147,7 @@ def build_gp3_modify_command(
 
 def _ec2_findings(resource: dict[str, Any], region: str, pricing_resolver: Any) -> list[dict[str, Any]]:
     state = str(resource.get("state") or "").lower()
+    resource_region = str(resource.get("region") or region)
     if state != "running":
         return []
 
@@ -165,8 +166,8 @@ def _ec2_findings(resource: dict[str, Any], region: str, pricing_resolver: Any) 
     sufficient = datapoints >= min_datapoints and observed_hours >= min_hours
     confidence = "medium" if sufficient else "low"
     category = "Recommendation" if sufficient else "Observation"
-    command = _ec2_stop_command(region, _resource_id(resource)) if sufficient else None
-    quote = _quote_ec2(pricing_resolver, region, str(resource.get("type_or_sku") or ""))
+    command = _ec2_stop_command(resource_region, _resource_id(resource)) if sufficient else None
+    quote = _quote_ec2(pricing_resolver, resource_region, str(resource.get("type_or_sku") or ""))
     max_cost = round(quote.hourly_usd * MONTHLY_HOURS, 2) if quote.status == "verified" and quote.hourly_usd is not None else None
     observed_phrase = "based on available data since launch" if _recent_launch(cpu) else "based on available CloudWatch datapoints"
 
@@ -210,6 +211,7 @@ def _ec2_findings(resource: dict[str, Any], region: str, pricing_resolver: Any) 
             action_risk=command["risk_label"] if command else "No command generated because observation evidence is insufficient.",
             command=command,
             extra={
+                **_resource_context(resource),
                 "maximum_monthly_avoidable_cost_usd": max_cost,
                 "maximum_monthly_avoidable_cost_display": format_monthly_savings(max_cost),
             },
@@ -220,13 +222,14 @@ def _ec2_findings(resource: dict[str, Any], region: str, pricing_resolver: Any) 
 def _ebs_findings(resource: dict[str, Any], region: str) -> list[dict[str, Any]]:
     metrics = _metrics(resource)
     volume_id = _resource_id(resource)
+    resource_region = str(resource.get("region") or region)
     volume_type = str(resource.get("type_or_sku") or "").lower()
     state = str(resource.get("state") or "").lower()
     unattached = state == "available" or bool(metrics.get("unattached"))
 
     if unattached:
         command = {
-            "text": f"aws ec2 delete-volume --region {region} --volume-id {volume_id}",
+            "text": f"aws ec2 delete-volume --region {resource_region} --volume-id {volume_id}",
             "risk": "destructive",
             "risk_label": "Destructive. Create and verify a snapshot first.",
             "operation": "delete",
@@ -255,6 +258,7 @@ def _ebs_findings(resource: dict[str, Any], region: str) -> list[dict[str, Any]]
                 recommendation="Create and verify a snapshot, then delete the unattached volume if it is no longer needed.",
                 action_risk=command["risk_label"],
                 command=command,
+                extra=_resource_context(resource),
             )
         ]
 
@@ -274,7 +278,7 @@ def _ebs_findings(resource: dict[str, Any], region: str) -> list[dict[str, Any]]
         min(throughput or GP3_MIN_THROUGHPUT_MIBPS, GP3_BASELINE_THROUGHPUT_MIBPS),
     )
     command = build_gp3_modify_command(
-        region=region,
+        region=resource_region,
         volume_id=volume_id,
         target_iops=target_iops,
         target_throughput_mibps=target_throughput,
@@ -310,6 +314,7 @@ def _ebs_findings(resource: dict[str, Any], region: str) -> list[dict[str, Any]]
             recommendation="Review disk throughput and IOPS metrics before reducing provisioned gp3 performance.",
             action_risk=command["risk_label"] if command else "No valid gp3 modify command was generated.",
             command=command,
+            extra=_resource_context(resource),
         )
     ]
 
@@ -357,16 +362,18 @@ def _s3_findings_and_warnings(resource: dict[str, Any]) -> tuple[list[dict[str, 
             recommendation="Consider adding a lifecycle policy only when object retention requirements are known.",
             action_risk="No command generated because no validated lifecycle transition was selected.",
             command=None,
+            extra=_resource_context(resource),
         )
     ], []
 
 
 def _elastic_ip_findings(resource: dict[str, Any], region: str) -> list[dict[str, Any]]:
     metrics = _metrics(resource)
+    resource_region = str(resource.get("region") or region)
     if not metrics.get("unassociated"):
         return []
     command = {
-        "text": f"aws ec2 release-address --region {region} --allocation-id {_resource_id(resource)}",
+        "text": f"aws ec2 release-address --region {resource_region} --allocation-id {_resource_id(resource)}",
         "risk": "destructive",
         "risk_label": "Destructive. Releasing an Elastic IP may make the public IP unrecoverable.",
         "operation": "release",
@@ -390,6 +397,7 @@ def _elastic_ip_findings(resource: dict[str, Any], region: str) -> list[dict[str
             recommendation="Release the address only after confirming it is not reserved for failover or DNS.",
             action_risk=command["risk_label"],
             command=command,
+            extra=_resource_context(resource),
         )
     ]
 
@@ -416,6 +424,7 @@ def _load_balancer_findings(resource: dict[str, Any]) -> list[dict[str, Any]]:
             recommendation="Review target groups, DNS, and traffic history before deleting or consolidating this load balancer.",
             action_risk="No command generated because delete impact was not validated.",
             command=None,
+            extra=_resource_context(resource),
         )
     ]
 
@@ -441,6 +450,7 @@ def _nat_gateway_findings(resource: dict[str, Any]) -> list[dict[str, Any]]:
             recommendation="Review whether private subnets need this NAT Gateway and whether endpoints can reduce data processing charges.",
             action_risk="No command generated because deleting NAT can break outbound connectivity.",
             command=None,
+            extra=_resource_context(resource),
         )
     ]
 
@@ -468,6 +478,7 @@ def _rds_findings(resource: dict[str, Any]) -> list[dict[str, Any]]:
                 recommendation="Review database metrics before resizing or changing availability settings.",
                 action_risk="No command generated because database changes can cause downtime or data risk.",
                 command=None,
+                extra=_resource_context(resource),
             )
         )
     return findings
@@ -825,6 +836,15 @@ def _recent_launch(cpu: dict[str, Any]) -> bool:
 def _metrics(resource: dict[str, Any]) -> dict[str, Any]:
     value = resource.get("metrics")
     return value if isinstance(value, dict) else {}
+
+
+def _resource_context(resource: dict[str, Any]) -> dict[str, Any]:
+    region = resource.get("region")
+    scope = resource.get("scope") or ("regional" if region else "global")
+    context = {"source": "budgetbeagle_rule", "scope": scope}
+    if region:
+        context["region"] = region
+    return context
 
 
 def _resource_id(resource: dict[str, Any]) -> str:

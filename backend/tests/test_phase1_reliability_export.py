@@ -211,7 +211,7 @@ def test_canonical_schema_normalizes_legacy_without_duplicate_issues() -> None:
         "scan": {"resources": [{"service": "EC2", "id": "i-1", "metrics": {"low_utilization_candidate": True}}]},
         "analysis": {"summary": "legacy", "issues": [{"resource_id": "i-1"}], "confidence": {"score": 80, "label": "High"}},
     })
-    assert result["schema_version"] == "2.0"
+    assert result["schema_version"] == "2.1"
     assert "issues" not in result
     assert result["findings"][0]["resource_id"] == "i-1"
     assert result["resources"][0]["metrics"]["utilization_signal"]["assessment"] == "observation"
@@ -291,6 +291,7 @@ def test_zip_export_endpoint_contains_exact_safe_utf8_files(monkeypatch: pytest.
             "billing-regions.csv",
             "warnings.csv",
             "service-coverage.csv",
+            "regions.csv",
         ]
         decoded = {name: archive.read(name).decode("utf-8") for name in archive.namelist()}
 
@@ -308,6 +309,7 @@ def test_zip_export_endpoint_contains_exact_safe_utf8_files(monkeypatch: pytest.
     assert "us-east-1" in decoded["billing-regions.csv"]
     assert "s3:GetLifecycleConfiguration" in decoded["warnings.csv"]
     assert "EBS" in decoded["service-coverage.csv"]
+    assert "us-east-1" in decoded["regions.csv"]
 
 
 def test_export_payload_normalizes_negative_zero_and_canonical_summary() -> None:

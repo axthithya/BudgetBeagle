@@ -19,6 +19,7 @@ from sanitize import (
     parse_identity,
     scrub_sensitive_text,
 )
+from region_discovery import discover_enabled_regions
 
 
 class ScannerError(Exception):
@@ -59,9 +60,20 @@ def _average(datapoints: list[dict[str, Any]], field: str = "Average") -> float 
 
 
 class AwsScanner:
-    def __init__(self, region: str, resource_group: str | None = None):
+    def __init__(
+        self,
+        region: str,
+        resource_group: str | None = None,
+        *,
+        include_billing: bool = True,
+        scan_s3: bool = True,
+        billing_context: dict[str, Any] | None = None,
+    ):
         self.region = region
         self.resource_group = resource_group
+        self.include_billing = include_billing
+        self.scan_s3 = scan_s3
+        self.billing_context = billing_context
         self.session = boto3.Session(region_name=region)
         self.errors: list[dict[str, str]] = []
         self.warnings: list[dict[str, Any]] = []
@@ -74,14 +86,13 @@ class AwsScanner:
 
     @staticmethod
     def enabled_regions() -> list[str]:
-        try:
-            client = boto3.client("ec2", region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
-            regions = client.describe_regions(AllRegions=False).get("Regions", [])
-            return sorted(region["RegionName"] for region in regions)
-        except (NoCredentialsError, PartialCredentialsError) as exc:
-            raise ScannerAuthError("AWS credentials are missing or incomplete.") from exc
-        except ClientError as exc:
-            raise _client_error_to_scanner_error(exc) from exc
+        result = discover_enabled_regions(base_region=os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+        if result.available:
+            return result.regions
+        error = result.error
+        if error and error.category == "auth":
+            raise ScannerAuthError(error.message)
+        raise ScannerError(error.message if error else "Region discovery failed.")
 
     @staticmethod
     def resource_groups(region: str | None = None) -> list[dict[str, str]]:
@@ -117,7 +128,8 @@ class AwsScanner:
         resources.extend(self._scan_elastic_ips())
         resources.extend(self._scan_load_balancers())
         resources.extend(self._scan_rds_instances())
-        resources.extend(self._scan_s3_buckets())
+        if self.scan_s3:
+            resources.extend(self._scan_s3_buckets())
         resources.extend(self._scan_nat_gateways())
 
         return {
@@ -128,11 +140,74 @@ class AwsScanner:
             "identity_type": self.identity_type,
             "identity_name": self.identity_name,
             "billing": self._scan_billing_context(),
-            "resources": resources,
+            "resources": [self._with_region(resource) for resource in resources],
             "errors": self.errors,
             "warnings": self.warnings,
         }
 
+    def scan_s3_buckets_for_regions(self, regions: list[str]) -> dict[str, Any]:
+        """Scan S3 buckets once, then keep only buckets in the requested regions."""
+        self._validate_credentials()
+        self._load_resource_group_scope()
+        requested = set(regions)
+        resources: list[dict[str, Any]] = []
+        try:
+            client = self._client("s3")
+            for bucket in client.list_buckets().get("Buckets", []):
+                name = bucket.get("Name", "")
+                bucket_region = self._bucket_region(client, name)
+                if bucket_region not in requested or not self._in_scope(name):
+                    continue
+                lifecycle = self._bucket_lifecycle_status(client, name)
+                size_bytes = self._metric_average(
+                    "AWS/S3",
+                    "BucketSizeBytes",
+                    [
+                        {"Name": "BucketName", "Value": name},
+                        {"Name": "StorageType", "Value": "StandardStorage"},
+                    ],
+                )
+                object_count = self._metric_average(
+                    "AWS/S3",
+                    "NumberOfObjects",
+                    [
+                        {"Name": "BucketName", "Value": name},
+                        {"Name": "StorageType", "Value": "AllStorageTypes"},
+                    ],
+                )
+                resources.append(
+                    self._with_region(
+                        {
+                            "service": "S3",
+                            "id": name,
+                            "name": name,
+                            "type_or_sku": "bucket",
+                            "state": "active",
+                            "tags": {},
+                            "region": bucket_region,
+                            "scope": "regional",
+                            "metrics": {
+                                "bucket_size_bytes": size_bytes,
+                                "object_count": object_count,
+                                "lifecycle_status": lifecycle,
+                            },
+                        },
+                        region=bucket_region,
+                    )
+                )
+        except Exception as exc:
+            self._record_error("s3", exc)
+        return {
+            "region": self.region,
+            "resource_group": self.resource_group,
+            "account_id": self.account_id_masked,
+            "account_id_raw": self.account_id,
+            "identity_type": self.identity_type,
+            "identity_name": self.identity_name,
+            "resources": resources,
+            "errors": self.errors,
+            "warnings": self.warnings,
+        }
     def _validate_credentials(self) -> None:
         try:
             identity = self.session.client("sts").get_caller_identity()
@@ -148,12 +223,27 @@ class AwsScanner:
             raise _client_error_to_scanner_error(exc) from exc
 
     def _scan_billing_context(self) -> dict[str, Any]:
+        if self.billing_context is not None:
+            return self.billing_context
+        if not self.include_billing:
+            return {
+                "status": "unavailable",
+                "source": "AWS Cost Explorer",
+                "error": {"code": "SkippedForRegionalScan", "message": "Billing is collected once per scan."},
+            }
         return scan_billing_context(
             self.session,
             selected_region=self.region,
             account_id=self.account_id,
             warn=self._record_warning,
         )
+
+    def _with_region(self, resource: dict[str, Any], *, region: str | None = None) -> dict[str, Any]:
+        item = dict(resource)
+        item.setdefault("region", region or self.region)
+        item.setdefault("scope", "regional")
+        item.setdefault("account_id", self.account_id_masked)
+        return item
 
     def _client(self, service: str):
         return self.session.client(service)

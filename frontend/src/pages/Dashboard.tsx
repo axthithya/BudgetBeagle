@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Copy, Check, Play, RefreshCcw, Shield, ShieldAlert, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Copy, Check, Play, RefreshCcw, Search, Shield, ShieldAlert, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { ProgressTracker } from "../components/ProgressTracker";
 import { apiFetch, AwsStatus, getToken, websocketUrl } from "../lib/api";
 import { clearStoredActiveAnalysisId, getStoredActiveAnalysisId, isFailureAnalysisStatus, isSuccessfulAnalysisStatus, isTerminalAnalysisStatus, storeActiveAnalysisId } from "../lib/analysisStatus";
 
-type RegionsResponse = { regions: string[] };
+type RegionMode = "single_region" | "selected_regions" | "all_enabled_regions";
+type RegionsResponse = { regions: string[]; status?: "available" | "empty" | "permission_denied" | "unavailable" | string; error?: { code?: string; message?: string; category?: string; permission?: string } | null; permission?: string };
 type GroupsResponse = { resource_groups: { name: string; arn: string; description?: string }[] };
 type AnalyzeResponse = { analysis_id: number; status: string; websocket_url: string };
 type AnalysisLookupResponse = { analysis: { status: string; analysis_result?: { error?: string; reason?: string } } };
-type ProgressPayload = { event?: string; message?: string; status?: string; details?: { reason?: string } };
+type ProgressDetails = { reason?: string; region_mode?: RegionMode | string; total_region_count?: number; completed_region_count?: number; failed_region_count?: number; active_regions?: string[]; current_service?: string; resources_discovered?: number; findings_generated?: number; warning_count?: number; cancellation_state?: string; overall_percentage?: number };
+type ProgressPayload = { event?: string; message?: string; status?: string; details?: ProgressDetails };
+const REGION_PATTERN = /^(?:[a-z]{2}|cn|us-gov|us-iso|us-isob|us-isof)-[a-z0-9-]+-\d+$/;
 
 const MINIMAL_POLICY = JSON.stringify({
   Version: "2012-10-17",
@@ -79,6 +82,12 @@ export default function Dashboard() {
   const [showPolicyModal, setShowPolicyModal] = useState(false);
   const [policyCopied, setPolicyCopied] = useState(false);
   const [currentAnalysisId, setCurrentAnalysisId] = useState<number | null>(null);
+  const [regionMode, setRegionMode] = useState<RegionMode>("single_region");
+  const [selectedRegions, setSelectedRegions] = useState<string[]>([]);
+  const [regionFilter, setRegionFilter] = useState("");
+  const [regionDiscoveryStatus, setRegionDiscoveryStatus] = useState<RegionsResponse["status"]>("unavailable");
+  const [regionDiscoveryError, setRegionDiscoveryError] = useState<RegionsResponse["error"] | null>(null);
+  const [progressDetails, setProgressDetails] = useState<ProgressDetails | null>(null);
 
   useEffect(() => {
     if (!initialLoadStartedRef.current) {
@@ -99,25 +108,40 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (region) {
+    if (region && regionMode === "single_region") {
       loadGroups(region);
+    } else {
+      setGroups([]);
+      setGroup("");
     }
-  }, [region]);
+  }, [region, regionMode]);
 
   async function loadRegions() {
     setLoading(true);
     setError("");
+    setRegionDiscoveryError(null);
     try {
       const data = await apiFetch<RegionsResponse>("/api/regions");
-      setRegions(data.regions);
-      setRegion((current) => current || data.regions[0] || "");
+      const sorted = [...new Set(data.regions)].filter(isValidRegion).sort();
+      setRegions(sorted);
+      setRegionDiscoveryStatus(data.status ?? (sorted.length ? "available" : "empty"));
+      setRegionDiscoveryError(data.error ?? null);
+      setRegion((current) => current || sorted[0] || "");
+      setSelectedRegions((current) => {
+        const kept = current.filter((item) => sorted.includes(item));
+        if (kept.length) return kept;
+        return sorted[0] ? [sorted[0]] : [];
+      });
     } catch (err) {
+      setRegions([]);
+      setSelectedRegions([]);
+      setRegionDiscoveryStatus("unavailable");
+      setRegionDiscoveryError({ message: err instanceof Error ? err.message : "Could not load regions." });
       setError(err instanceof Error ? err.message : "Could not load regions.");
     } finally {
       setLoading(false);
     }
   }
-
   async function loadAwsStatus() {
     try {
       const data = await apiFetch<AwsStatus>("/api/aws/status");
@@ -215,16 +239,30 @@ export default function Dashboard() {
   }
 
   async function runAnalysis() {
-    if (!region) return;
+    const validation = scanValidationError();
+    if (validation) {
+      setError(validation);
+      return;
+    }
     setError("");
     setMessages([]);
+    setProgressDetails(null);
     setRunning(true);
     finishAnalysis();
+
+    const body = regionMode === "single_region"
+      ? { region, resource_group: group || null }
+      : {
+          region: selectedRegions[0] || region,
+          resource_group: null,
+          region_mode: regionMode,
+          requested_regions: regionMode === "selected_regions" ? selectedRegions : [],
+        };
 
     try {
       const data = await apiFetch<AnalyzeResponse>("/api/analyze", {
         method: "POST",
-        body: JSON.stringify({ region, resource_group: group || null }),
+        body: JSON.stringify(body),
       });
       activeAnalysisIdRef.current = data.analysis_id;
       storeActiveAnalysisId(data.analysis_id);
@@ -238,6 +276,7 @@ export default function Dashboard() {
       socket.onmessage = (event) => {
         const payload = JSON.parse(event.data) as ProgressPayload;
         if (payload.message) appendMessage(payload.message);
+        if (payload.details) setProgressDetails(payload.details);
         const status = payload.status;
         if (isSuccessfulAnalysisStatus(status) || payload.event === "completed") {
           finishAnalysis(data.analysis_id);
@@ -264,7 +303,6 @@ export default function Dashboard() {
       setError(err instanceof Error ? err.message : "Analysis could not start.");
     }
   }
-
   async function cancelAnalysis() {
     if (!currentAnalysisId) return;
     try {
@@ -285,6 +323,41 @@ export default function Dashboard() {
     setTimeout(() => setPolicyCopied(false), 1500);
   }
 
+  function setMode(nextMode: RegionMode) {
+    setRegionMode(nextMode);
+    setError("");
+    if (nextMode === "selected_regions" && selectedRegions.length === 0 && region) {
+      setSelectedRegions([region]);
+    }
+  }
+
+  function toggleSelectedRegion(item: string) {
+    setSelectedRegions((current) => current.includes(item) ? current.filter((regionName) => regionName !== item) : [...current, item].sort());
+  }
+
+  function selectAllRegions() {
+    setSelectedRegions(regions);
+  }
+
+  function clearSelectedRegions() {
+    setSelectedRegions([]);
+  }
+
+  function scanValidationError() {
+    if (loading) return "Regions are still loading.";
+    if (regionMode === "single_region") {
+      if (!region) return "Choose a region before starting the scan.";
+      if (!isValidRegion(region)) return "The selected region identifier is invalid.";
+      return "";
+    }
+    if (regionMode === "selected_regions") {
+      if (selectedRegions.length === 0) return "Select at least one region.";
+      if (selectedRegions.some((item) => !isValidRegion(item) || !regions.includes(item))) return "One or more selected region identifiers are invalid.";
+      return "";
+    }
+    if (regionDiscoveryStatus !== "available" || regions.length === 0) return "All enabled regions cannot be resolved until region discovery succeeds.";
+    return "";
+  }
   return (
     <div className="space-y-6">
       {/* AWS Connection Panel */}
@@ -314,41 +387,139 @@ export default function Dashboard() {
             </div>
           )}
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <label className="block text-sm font-medium text-slate-300">
-              Region
-              <select
-                className="mt-2 h-11 w-full rounded-md border border-cloud-line bg-cloud-ink px-3 text-white outline-none focus:border-cloud-orange"
-                value={region}
-                onChange={(event) => setRegion(event.target.value)}
-                disabled={loading || running}
-              >
-                {loading && <option>Loading</option>}
-                {!loading && regions.map((item) => <option key={item}>{item}</option>)}
-              </select>
-            </label>
+          <div className="space-y-5">
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium text-slate-300">Scan mode</legend>
+              <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Region scan mode">
+                {[
+                  ["single_region", "Single region"],
+                  ["selected_regions", "Selected regions"],
+                  ["all_enabled_regions", "All enabled regions"],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={regionMode === value}
+                    onClick={() => setMode(value as RegionMode)}
+                    disabled={running}
+                    className={`h-11 rounded-md border px-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-cloud-cyan ${
+                      regionMode === value ? "border-cloud-cyan bg-cloud-cyan text-slate-950" : "border-cloud-line bg-cloud-ink text-slate-200 hover:border-cloud-cyan"
+                    } disabled:cursor-not-allowed disabled:opacity-60`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
 
-            {groups.length > 0 && (
-              <label className="block text-sm font-medium text-slate-300">
-                Resource Group
-                <select
-                  className="mt-2 h-11 w-full rounded-md border border-cloud-line bg-cloud-ink px-3 text-white outline-none focus:border-cloud-orange"
-                  value={group}
-                  onChange={(event) => setGroup(event.target.value)}
-                  disabled={running}
-                >
-                  <option value="">Whole region</option>
-                  {groups.map((item) => <option key={item.arn || item.name} value={item.name}>{item.name}</option>)}
-                </select>
-              </label>
+            {regionMode === "single_region" && (
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="block text-sm font-medium text-slate-300">
+                  Region
+                  <select
+                    className="mt-2 h-11 w-full rounded-md border border-cloud-line bg-cloud-ink px-3 text-white outline-none focus:border-cloud-orange focus:ring-2 focus:ring-cloud-cyan"
+                    value={region}
+                    onChange={(event) => setRegion(event.target.value)}
+                    disabled={loading || running}
+                  >
+                    {loading && <option>Loading</option>}
+                    {!loading && regions.map((item) => <option key={item}>{item}</option>)}
+                  </select>
+                </label>
+
+                {groups.length > 0 && (
+                  <label className="block text-sm font-medium text-slate-300">
+                    Resource Group
+                    <select
+                      className="mt-2 h-11 w-full rounded-md border border-cloud-line bg-cloud-ink px-3 text-white outline-none focus:border-cloud-orange focus:ring-2 focus:ring-cloud-cyan"
+                      value={group}
+                      onChange={(event) => setGroup(event.target.value)}
+                      disabled={running}
+                    >
+                      <option value="">Whole region</option>
+                      {groups.map((item) => <option key={item.arn || item.name} value={item.name}>{item.name}</option>)}
+                    </select>
+                  </label>
+                )}
+              </div>
+            )}
+
+            {regionMode === "selected_regions" && (
+              <section className="rounded-lg border border-cloud-line bg-cloud-ink p-4" aria-labelledby="selected-regions-heading">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 id="selected-regions-heading" className="font-semibold text-white">Selected regions</h2>
+                    <p className="mt-1 text-sm text-slate-400">{selectedRegions.length} selected</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={selectAllRegions} disabled={running || loading || regions.length === 0} className="h-9 rounded-md border border-cloud-line px-3 text-sm text-slate-200 hover:border-cloud-cyan focus:outline-none focus:ring-2 focus:ring-cloud-cyan disabled:opacity-60">Select all</button>
+                    <button type="button" onClick={clearSelectedRegions} disabled={running || selectedRegions.length === 0} className="h-9 rounded-md border border-cloud-line px-3 text-sm text-slate-200 hover:border-cloud-cyan focus:outline-none focus:ring-2 focus:ring-cloud-cyan disabled:opacity-60">Clear all</button>
+                  </div>
+                </div>
+
+                <label className="mt-4 block text-sm font-medium text-slate-300">
+                  Search regions
+                  <span className="mt-2 flex h-11 items-center gap-2 rounded-md border border-cloud-line bg-cloud-panel px-3 focus-within:border-cloud-orange focus-within:ring-2 focus-within:ring-cloud-cyan">
+                    <Search className="h-4 w-4 text-slate-500" aria-hidden="true" />
+                    <input
+                      value={regionFilter}
+                      onChange={(event) => setRegionFilter(event.target.value)}
+                      disabled={running}
+                      className="w-full bg-transparent text-white outline-none placeholder:text-slate-500"
+                      placeholder="Filter by identifier"
+                      aria-label="Filter regions"
+                    />
+                  </span>
+                </label>
+
+                {loading && <p className="mt-4 text-sm text-slate-400" role="status">Loading regions...</p>}
+                {!loading && regions.length === 0 && <RegionDiscoveryState status={regionDiscoveryStatus} error={regionDiscoveryError} onRetry={loadRegions} />}
+                {!loading && regions.length > 0 && filteredRegions(regions, regionFilter).length === 0 && (
+                  <p className="mt-4 rounded-md border border-cloud-line p-3 text-sm text-slate-400">No regions match your search.</p>
+                )}
+                {!loading && filteredRegions(regions, regionFilter).length > 0 && (
+                  <div className="mt-4 grid max-h-72 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3" role="group" aria-label="AWS regions">
+                    {filteredRegions(regions, regionFilter).map((item) => (
+                      <label key={item} className="flex min-h-11 items-center gap-3 rounded-md border border-cloud-line bg-cloud-panel px-3 py-2 text-sm text-slate-200 focus-within:ring-2 focus-within:ring-cloud-cyan hover:border-cloud-cyan">
+                        <input
+                          type="checkbox"
+                          checked={selectedRegions.includes(item)}
+                          onChange={() => toggleSelectedRegion(item)}
+                          disabled={running}
+                          className="h-4 w-4 accent-cloud-cyan"
+                        />
+                        <span>{item}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+
+            {regionMode === "all_enabled_regions" && (
+              <section className="rounded-lg border border-cloud-line bg-cloud-ink p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="font-semibold text-white">All enabled regions</h2>
+                    <p className="mt-1 text-sm text-slate-400">{regions.length} regions resolved by AWS region discovery</p>
+                  </div>
+                  <button type="button" onClick={loadRegions} disabled={loading || running} className="inline-flex h-9 items-center gap-2 rounded-md border border-cloud-line px-3 text-sm text-slate-200 hover:border-cloud-cyan focus:outline-none focus:ring-2 focus:ring-cloud-cyan disabled:opacity-60">
+                    <RefreshCcw className="h-4 w-4" aria-hidden="true" />
+                    Retry
+                  </button>
+                </div>
+                {regionDiscoveryStatus !== "available" ? <RegionDiscoveryState status={regionDiscoveryStatus} error={regionDiscoveryError} onRetry={loadRegions} /> : (
+                  <p className="mt-3 text-sm text-slate-300">BudgetBeagle will scan every enabled region returned by AWS in deterministic alphabetical order.</p>
+                )}
+              </section>
             )}
           </div>
-
           <div className="mt-6 flex flex-wrap gap-3">
             <button
               type="button"
               onClick={runAnalysis}
-              disabled={!region || loading || running}
+              disabled={Boolean(scanValidationError()) || running}
               className="inline-flex h-11 items-center gap-2 rounded-md bg-cloud-orange px-5 font-semibold text-slate-950 hover:bg-orange-300 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-cloud-cyan"
             >
               <Play className="h-4 w-4" aria-hidden="true" />
@@ -369,7 +540,7 @@ export default function Dashboard() {
 
         <aside>
           <h2 className="mb-3 text-sm font-semibold uppercase text-slate-400">Progress</h2>
-          <ProgressTracker messages={messages} />
+          <ProgressTracker messages={messages} details={progressDetails} />
         </aside>
       </div>
 
@@ -417,6 +588,36 @@ export default function Dashboard() {
   );
 }
 
+function isValidRegion(value: string) {
+  return REGION_PATTERN.test(value);
+}
+
+function filteredRegions(regions: string[], filter: string) {
+  const needle = filter.trim().toLowerCase();
+  if (!needle) return regions;
+  return regions.filter((item) => item.toLowerCase().includes(needle));
+}
+
+function RegionDiscoveryState({ status, error, onRetry }: { status?: string; error?: RegionsResponse["error"] | null; onRetry: () => void }) {
+  const permission = error?.permission;
+  const title = status === "permission_denied"
+    ? "Region discovery permission denied"
+    : status === "empty"
+      ? "No enabled regions returned"
+      : "Region discovery unavailable";
+  const message = error?.message ?? (status === "empty" ? "AWS returned no enabled regions for this account." : "BudgetBeagle could not resolve enabled regions.");
+  return (
+    <div className="mt-4 rounded-lg border border-amber-400/40 bg-amber-500/10 p-4 text-sm text-amber-50" role="alert">
+      <p className="font-semibold text-white">{title}</p>
+      <p className="mt-1 leading-6">{message}</p>
+      {permission && <p className="mt-1 text-amber-100/80">Permission: <code className="text-amber-200">{permission}</code></p>}
+      <button type="button" onClick={onRetry} className="mt-3 inline-flex h-9 items-center gap-2 rounded-md border border-amber-400/30 px-3 text-sm text-amber-100 hover:border-amber-300 focus:outline-none focus:ring-2 focus:ring-cloud-cyan">
+        <RefreshCcw className="h-4 w-4" aria-hidden="true" />
+        Retry
+      </button>
+    </div>
+  );
+}
 function AwsConnectionPanel({ status, onViewPolicy }: { status: AwsStatus; onViewPolicy: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const isLimited = status.connection_status === "connected_with_limited_permissions";

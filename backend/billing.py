@@ -15,7 +15,8 @@ WarnFn = Callable[[str, str | None, str, str, str | None], None]
 def scan_billing_context(
     session: Any,
     *,
-    selected_region: str,
+    selected_region: str | None = None,
+    selected_regions: list[str] | None = None,
     account_id: str | None,
     warn: WarnFn,
 ) -> dict[str, Any]:
@@ -25,13 +26,17 @@ def scan_billing_context(
     today = datetime.now(timezone.utc).date()
     start = date(today.year, 1, 1)
     end = today if today > start else today + timedelta(days=1)
-    region_values = _region_dimension_candidates(selected_region)
+    selected_regions = _normalize_selected_regions(selected_region, selected_regions)
+    primary_region = selected_regions[0] if selected_regions else selected_region
+    region_values = _region_dimension_candidates(selected_regions)
     context = {
         "status": "unavailable",
         "source": "AWS Cost Explorer",
         "account_id": mask_account_id(account_id),
-        "selected_region": selected_region,
-        "selected_region_label": region_label(selected_region),
+        "selected_region": primary_region,
+        "selected_regions": selected_regions,
+        "selected_region_count": len(selected_regions),
+        "selected_region_label": _selected_region_label(selected_regions),
         "period": {
             "label": f"YTD {today.year}",
             "start": start.isoformat(),
@@ -66,7 +71,7 @@ def scan_billing_context(
                 "monthly_selected_region_costs": region_months,
                 "service_costs_ytd": service_costs,
                 "region_costs_ytd": region_costs,
-                "insights": _billing_insights(selected_region, selected_region_total, account_total, region_costs),
+                "insights": _billing_insights(_selected_region_label(selected_regions), selected_region_total, account_total, region_costs),
             }
         )
         return context
@@ -150,7 +155,7 @@ def _grouped_ytd(client: Any, start: date, end: date, dimension: str) -> list[di
 
 
 def _billing_insights(
-    selected_region: str,
+    selected_region_label: str,
     selected_region_total: float,
     account_total: float,
     region_costs: list[dict[str, Any]],
@@ -166,7 +171,7 @@ def _billing_insights(
             "severity": "medium",
             "title": "No spend in this region",
             "message": (
-                f"AWS Cost Explorer reports $0.00 for {region_label(selected_region)} in the selected period, "
+                f"AWS Cost Explorer reports $0.00 for {selected_region_label} in the selected period, "
                 f"while account-wide billing is {_money(account_total)}."
             ),
             "regions": billed_regions[:8],
@@ -178,11 +183,27 @@ def _region_filter(values: list[str]) -> dict[str, Any]:
     return {"Dimensions": {"Key": "REGION", "Values": values}}
 
 
-def _region_dimension_candidates(region: str) -> list[str]:
-    values = [region]
-    location = REGION_TO_PRICING_LOCATION.get(region)
-    if location:
-        values.append(location)
+def _normalize_selected_regions(selected_region: str | None, selected_regions: list[str] | None) -> list[str]:
+    values = selected_regions if selected_regions is not None else ([selected_region] if selected_region else [])
+    return sorted({str(region).strip() for region in values if str(region or "").strip()})
+
+
+def _selected_region_label(selected_regions: list[str]) -> str:
+    if not selected_regions:
+        return "Unknown region"
+    if len(selected_regions) == 1:
+        return region_label(selected_regions[0])
+    return f"{len(selected_regions)} selected scan regions"
+
+
+def _region_dimension_candidates(regions: list[str]) -> list[str]:
+    values: list[str] = []
+    for region in regions:
+        if region not in values:
+            values.append(region)
+        location = REGION_TO_PRICING_LOCATION.get(region)
+        if location and location not in values:
+            values.append(location)
     return values
 
 

@@ -26,6 +26,7 @@ export function Navbar() {
         <nav className="flex items-center gap-2">
           <NavLink
             to="/"
+            aria-label="Dashboard"
             className={({ isActive }) =>
               `inline-flex h-10 items-center gap-2 rounded-md px-3 text-sm ${
                 isActive ? "bg-slate-800 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"
@@ -37,6 +38,7 @@ export function Navbar() {
           </NavLink>
           <NavLink
             to="/history"
+            aria-label="History"
             className={({ isActive }) =>
               `inline-flex h-10 items-center gap-2 rounded-md px-3 text-sm ${
                 isActive ? "bg-slate-800 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"

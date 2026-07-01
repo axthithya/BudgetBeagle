@@ -20,6 +20,7 @@ ZIP_FILENAMES = [
     "billing-regions.csv",
     "warnings.csv",
     "service-coverage.csv",
+    "regions.csv",
 ]
 
 
@@ -35,6 +36,7 @@ def generate_zip_export(analysis_record: dict[str, Any]) -> StreamingResponse:
         zip_file.writestr("billing-regions.csv", _billing_csv(payload, "region_costs_ytd", ["Region", "Amount USD", "Display"]).encode("utf-8"))
         zip_file.writestr("warnings.csv", _warnings_csv(payload).encode("utf-8"))
         zip_file.writestr("service-coverage.csv", _coverage_csv(payload).encode("utf-8"))
+        zip_file.writestr("regions.csv", _regions_csv(payload).encode("utf-8"))
 
     zip_buffer.seek(0)
     return StreamingResponse(
@@ -51,7 +53,7 @@ def build_export_payload(analysis_record: dict[str, Any]) -> dict[str, Any]:
         resource_group=analysis_record.get("scan_target"),
     )
     payload = {
-        "schema_version": "2.0",
+        "schema_version": "2.1",
         "analysis_id": analysis_record.get("id"),
         "status": analysis_record.get("status"),
         "region": analysis_record.get("region"),
@@ -71,6 +73,9 @@ def _summary_csv(payload: dict[str, Any]) -> str:
     rows = [
         ["Metric", "Value"],
         ["Status", payload.get("status", "Unknown")],
+        ["Region Mode", payload.get("region_mode", "single_region")],
+        ["Requested Regions", "; ".join(payload.get("requested_regions", []) or []) or "Unknown"],
+        ["Resolved Regions", "; ".join(payload.get("resolved_regions", []) or []) or "Unknown"],
         ["Resources Scanned", report.get("resources_scanned", "Unknown")],
         ["Resources Discovered", service_summary.get("resources_discovered", "Unknown")],
         ["Services Scanned", service_summary.get("services_scanned_display", "Unknown")],
@@ -109,6 +114,7 @@ def _resources_csv(payload: dict[str, Any]) -> str:
 def _findings_csv(payload: dict[str, Any]) -> str:
     rows = [[
         "Category",
+        "Region",
         "Service",
         "Resource ID",
         "Finding",
@@ -127,6 +133,7 @@ def _findings_csv(payload: dict[str, Any]) -> str:
         savings_confidence = finding.get("savings_confidence") or {}
         rows.append([
             finding.get("category", "Unknown"),
+            finding.get("region") or finding.get("scope") or "Unknown",
             finding.get("service", "Unknown"),
             finding.get("resource_id", "Unknown"),
             finding.get("issue_type", "Unknown"),
@@ -153,9 +160,10 @@ def _billing_csv(payload: dict[str, Any], key: str, header: list[str]) -> str:
 
 
 def _warnings_csv(payload: dict[str, Any]) -> str:
-    rows = [["Service", "Resource ID", "Code", "Message", "Permission", "Resolution"]]
+    rows = [["Region", "Service", "Resource ID", "Code", "Message", "Permission", "Resolution"]]
     for warning in payload.get("warnings", []):
         rows.append([
+            warning.get("region") or "",
             warning.get("service", "Unknown"),
             warning.get("resource_id", ""),
             warning.get("code", "Unknown"),
@@ -165,6 +173,23 @@ def _warnings_csv(payload: dict[str, Any]) -> str:
         ])
     return _csv(rows)
 
+
+def _regions_csv(payload: dict[str, Any]) -> str:
+    rows = [["Region", "Status", "Resources", "Findings", "Warnings", "Error Category", "Safe Error Message", "Services Attempted", "Services Completed", "Services Failed"]]
+    for item in payload.get("regional_results", []) or []:
+        rows.append([
+            item.get("region", "Unknown"),
+            item.get("status", "Unknown"),
+            item.get("resources_discovered", 0),
+            item.get("findings_generated", 0),
+            item.get("warning_count", 0),
+            item.get("error_category", ""),
+            item.get("safe_error_message", ""),
+            "; ".join(item.get("services_attempted", []) or []),
+            "; ".join(item.get("services_completed", []) or []),
+            "; ".join(item.get("services_failed", []) or []),
+        ])
+    return _csv(rows)
 
 def _coverage_csv(payload: dict[str, Any]) -> str:
     rows = [["Service", "Status", "Count", "Scanned", "Has Resources", "Label"]]

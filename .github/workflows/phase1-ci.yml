@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - phase1-recovery
+      - phase2a-multiregion-native-recommendations
 
 permissions:
   contents: read
