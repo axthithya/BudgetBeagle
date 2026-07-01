@@ -19,7 +19,7 @@ BudgetBeagle's goal is to become an open-source, evidence-first AWS FinOps assis
 
 ## Phase 2A: Multi-Region And Native Recommendation Foundation
 
-- 2A.1 Multi-region scanning foundation: IN PROGRESS.
+- 2A.1 Multi-region scanning foundation: COMPLETE.
   - Single-region legacy compatibility.
   - Selected-regions and all-enabled-regions scan modes.
   - Structured region discovery with `ec2:DescribeRegions`.

@@ -17,9 +17,9 @@
 
 ## Phase 2A.1: Multi-Region Scanning Foundation
 
-**Status: IN PROGRESS**
+**Status: COMPLETE**
 
-Do not mark this phase complete until implementation, automated checks, builds, production audit, Docker config, launcher check, documentation, branch push, and clean working-tree criteria all pass.
+Completion evidence: local backend tests, frontend typecheck/tests/build/audit, Docker config, launcher check, documentation, branch push, and GitHub Actions passed on 2026-07-01.
 
 ### Verified Architecture Audit
 
